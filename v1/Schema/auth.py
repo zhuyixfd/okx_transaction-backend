@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+from config.cn_time import as_beijing
 
 
 class LoginRequest(BaseModel):
@@ -19,4 +21,10 @@ class MeResponse(BaseModel):
     id: int
     username: str
     created_at: datetime
+
+    @field_serializer("created_at")
+    def _dt_beijing(self, v: datetime) -> datetime:
+        out = as_beijing(v)
+        assert out is not None
+        return out
 

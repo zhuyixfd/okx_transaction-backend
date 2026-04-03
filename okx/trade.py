@@ -4,6 +4,17 @@ from datetime import datetime
 
 import aiohttp
 
+from config.cn_time import CN_TZ
+
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
 
 class OkxTrade:
     query_position_current: str = (
@@ -17,27 +28,28 @@ class OkxTrade:
     @classmethod
     def get_session(cls) -> aiohttp.ClientSession:
         if cls._session is None or cls._session.closed:
-            cls._session = aiohttp.ClientSession()
+            cls._session = aiohttp.ClientSession(headers=_DEFAULT_HEADERS)
         return cls._session
 
     @classmethod
-    async def get_uniqueName(cls, url: str) -> str | None:
+    async def get_uniqueName(cls, url: str) -> tuple[str | None, str | None]:
         """
-        从落地页 URL 解析用户 uniqueName。
+        从跟单落地页 HTML 中解析 nickName、uniqueName。
 
-        url 示例: https://www.oyidl.net/ul/4DtIo37
+        链接示例: https://oyidl.net/ul/4DtIo37
+
+        Returns:
+            (nickname, unique_name)，任一可能为 None；解析失败时多为 (None, None)。
         """
         session = cls.get_session()
-        async with session.get(url) as response:
+        async with session.get(url, allow_redirects=True) as response:
             html = await response.text()
-            uniqueName_group = re.search('"uniqueName":.*?"(.*?)"', html)
-            nickName_group = re.search('"nickName":.*?"(.*?)"', html)
-            if not uniqueName_group:
-                return None
-            uniqueName = uniqueName_group.group(1)
-            nickName = nickName_group.group(1)
-            return (nickName, uniqueName)
-        return None
+        # JSON 片段中的字段，允许中间有空白
+        nick_m = re.search(r'"nickName"\s*:\s*"(.*?)"', html)
+        unique_m = re.search(r'"uniqueName"\s*:\s*"(.*?)"', html)
+        nickname = nick_m.group(1) if nick_m else None
+        unique_name = unique_m.group(1) if unique_m else None
+        return (nickname, unique_name)
 
     @classmethod
     async def get_position_current(cls, uniqueName: str):
@@ -61,22 +73,27 @@ class OkxTrade:
 
     @staticmethod
     async def clean_position_current(data: dict):
-        posData = data["data"][0]["posData"]
-        res: dict = {}
+        try:
+            posData = data["data"][0]["posData"]
+        except (KeyError, IndexError, TypeError):
+            return []
+        res: list = []
         if len(posData) == 0:
             return res
         for pos in posData:
-            res[pos["posId"]] = {
+            res.append({
+                'posId': pos["posId"],
                 "cTime": pos["cTime"],
                 "cTime_format": datetime.fromtimestamp(
-                    int(pos["cTime"]) / 1000
+                    int(pos["cTime"]) / 1000,
+                    tz=CN_TZ,
                 ).strftime("%Y-%m-%d %H:%M:%S"),
                 "posCcy": pos["posCcy"],
                 "posSide": pos["posSide"],
                 "lever": pos["lever"],
                 "avgPx": pos["avgPx"],
                 "last": pos["last"],
-            }
+            })
         return res
 
     @classmethod

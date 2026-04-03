@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from config.constant import config as db_config
@@ -16,6 +16,17 @@ engine = create_engine(
     pool_recycle=3600,
     future=True,
 )
+
+
+@event.listens_for(engine, "connect")
+def _set_mysql_session_timezone(dbapi_conn, _connection_record) -> None:
+    """统一 MySQL 会话时区为北京时间，与 `config.cn_time` 一致。"""
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute("SET time_zone = '+08:00'")
+    finally:
+        cur.close()
+
 
 Base = declarative_base()
 

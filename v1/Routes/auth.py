@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import os
-import secrets
 import time
 from typing import Optional
 
@@ -33,12 +32,6 @@ def pbkdf2_hash_password(password: str, salt: str, iterations: int = 100_000) ->
         "sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations
     )
     return base64.b64encode(dk).decode("ascii")
-
-
-def hash_password(password: str) -> tuple[str, str]:
-    salt = secrets.token_hex(16)
-    password_hash = pbkdf2_hash_password(password, salt=salt)
-    return salt, password_hash
 
 
 def verify_password(password: str, *, salt: str, password_hash: str) -> bool:
@@ -117,30 +110,6 @@ def get_current_user(
     if not row:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
     return row
-
-
-def seed_admin_user(db: Session) -> None:
-    """
-    Seed a default admin user for first-time usage.
-    """
-    ensure_mysql_db_configured()
-
-    username = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
-    password = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin123456")
-
-    exists = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
-    if exists is not None:
-        return
-
-    salt, password_hash = hash_password(password)
-    db.add(
-        User(
-            username=username,
-            salt=salt,
-            password_hash=password_hash,
-        )
-    )
-    db.commit()
 
 
 @router.post("/login", response_model=LoginResponse)

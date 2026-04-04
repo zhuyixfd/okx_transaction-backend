@@ -193,7 +193,7 @@ class OkxFollowOrderClient:
         leverage: int,
     ) -> tuple[bool, str | dict[str, Any]]:
         """
-        U 本位 linear 永续：保证金(USDT) × 杠杆 = 目标名义，名义 ≈ 张数 × ctVal × 标记价，向下取整到 lotSz。
+        U 本位 linear 永续：按保证金×杠杆得到目标名义后换算张数。
         """
         try:
             margin = Decimal(str(principal_usdt_str).strip())
@@ -273,7 +273,7 @@ class OkxFollowOrderClient:
         pos_side: str | None = None,
     ) -> tuple[bool, Any]:
         """
-        U 本位永续市价开仓：principal_usdt 为保证金(USDT)，名义 = 保证金 × leverage，再换张数下单。
+        U 本位永续市价开仓：principal_usdt 为保证金(USDT)，内部换算张数后下单。
         成功: (True, OKX 下单响应体)
         失败: (False, ("sz", detail)) 换算失败；(False, ("place", detail)) 下单失败
         """

@@ -67,7 +67,7 @@ def _sizing_lever_from_leverage_info(
     hedge_mode: bool,
     pos_side: str,
 ) -> int | None:
-    """从 GET /api/v5/account/leverage-info 响应中取用于算名义的杠杆（开平仓优先匹配 posSide）。"""
+    """从 leverage-info 响应中取杠杆（开平仓优先匹配 posSide）。"""
     if not isinstance(li_data, dict) or str(li_data.get("code")) != "0":
         return None
     rows = li_data.get("data")
@@ -117,7 +117,7 @@ class ContractOrderBody(BaseModel):
         ...,
         min_length=1,
         max_length=32,
-        description="开仓保证金/本金（USDT）；名义仓位 = 本金 × 杠杆，再换算张数",
+        description="开仓保证金/本金（USDT）",
     )
     direction: Literal["long", "short"] = Field(
         ...,
@@ -127,7 +127,7 @@ class ContractOrderBody(BaseModel):
     lever: str | None = Field(
         default=None,
         max_length=16,
-        description="杠杆倍数；填写则先 set-leverage，且用于 本金×杠杆 算名义。不填则读当前合约杠杆",
+        description="杠杆倍数；填写则先 set-leverage。不填则读当前合约杠杆",
     )
 
     @field_validator("lever", mode="before")

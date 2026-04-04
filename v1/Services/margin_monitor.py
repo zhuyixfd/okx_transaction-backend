@@ -1,10 +1,10 @@
 """
-轮询本人 OKX 永续持仓保证金率：当 mgnRatio ≤ 配置阈值时，按「下注金额 × 追加比例」追加逐仓保证金。
+轮询本人 OKX 永续持仓保证金率：当 mgnRatio ≤ 内置阈值（200%）时，按「下注金额 × 追加比例」追加逐仓保证金。
 
 需配置环境变量 OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE；
 至少一条 follow_accounts 记录开启 margin_auto_enabled 且填写 bet_amount_per_position。
 
-多帐户同时启用时：取下注金额、阈值、追加比例中的最小值（偏保守）。
+多帐户同时启用时：取下注金额、追加比例中的最小值（偏保守）。
 """
 
 from __future__ import annotations
@@ -19,11 +19,13 @@ from sqlalchemy.orm import Session
 from config.constant import config as db_config
 from config.db import SessionLocal
 from config.okx_private import okx_private_config
-from okx.private_api import add_position_margin, get_positions_inst
+from module.private_api import add_position_margin, get_positions_inst
 from v1.Models.follow_account import FollowAccount
 
 _last_add_ts: dict[tuple[str, str], float] = {}
 COOLDOWN_SEC = 60.0
+# 原可配置项已移除，触发条件固定为该阈值（与历史库默认一致）
+DEFAULT_MARGIN_RATIO_THRESHOLD_PCT = Decimal("200")
 
 
 def _aggregate_config(db: Session) -> dict[str, Decimal] | None:
@@ -44,13 +46,12 @@ def _aggregate_config(db: Session) -> dict[str, Decimal] | None:
         for r in rows
         if r.bet_amount_per_position is not None and r.bet_amount_per_position > 0
     ]
-    ths = [r.margin_ratio_threshold_pct for r in rows if r.margin_ratio_threshold_pct is not None]
     ars = [r.margin_add_ratio_of_bet for r in rows if r.margin_add_ratio_of_bet is not None]
     if not bets:
         return None
     return {
         "bet_min": min(bets),
-        "thr": min(ths) if ths else Decimal("200"),
+        "thr": DEFAULT_MARGIN_RATIO_THRESHOLD_PCT,
         "add_ratio": min(ars) if ars else Decimal("0.2"),
     }
 

@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from config.cn_time import now_cn
 from config.constant import config as db_config
 from config.db import SessionLocal
-from okx import OkxTrade
-from okx.trade import pick_lever_from_pos
+from module import OkxTrade
+from module.trade import pick_lever_from_pos
 from v1.Models.follow_account import FollowAccount
 from v1.Models.follow_position import FollowPositionEvent, FollowPositionSnapshot
 from v1.Models.follow_sim_record import FollowSimRecord

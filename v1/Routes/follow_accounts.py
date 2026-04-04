@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from config.cn_time import now_cn
 from config.db import get_db
 from config.constant import config as db_config
-from okx import OkxTrade
+from module import OkxTrade
 from v1.Models.follow_account import FollowAccount
 from v1.Models.follow_position import FollowPositionEvent, FollowPositionSnapshot
 from v1.Models.follow_sim_record import FollowSimRecord
@@ -88,13 +88,11 @@ def _to_out(
         bet_amount_per_position=row.bet_amount_per_position,
         max_follow_positions=row.max_follow_positions,
         bet_mode=row.bet_mode or "cost",
-        margin_ratio_threshold_pct=row.margin_ratio_threshold_pct
-        if row.margin_ratio_threshold_pct is not None
-        else Decimal("200"),
         margin_add_ratio_of_bet=row.margin_add_ratio_of_bet
         if row.margin_add_ratio_of_bet is not None
         else Decimal("0.2"),
         margin_auto_enabled=bool(row.margin_auto_enabled),
+        margin_add_max_times=row.margin_add_max_times,
     )
 
 

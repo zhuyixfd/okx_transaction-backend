@@ -30,14 +30,17 @@ class FollowConfigPatch(BaseModel):
         description="最多同时跟 n 个仓位：对方少于 n 则全跟，多于 n 则只跟 n，换仓后仍不超过 n",
     )
     bet_mode: Optional[str] = Field(None, description="下注模式：cost=按成本下单")
-    margin_ratio_threshold_pct: Optional[Decimal] = Field(
-        None, ge=0, le=10000, description="保证金率阈值（%），低于等于则触发追加"
-    )
     margin_add_ratio_of_bet: Optional[Decimal] = Field(
         None, ge=0, le=1, description="追加金额 = 下注金额 × 该比例"
     )
     margin_auto_enabled: Optional[bool] = Field(
         None, description="是否启用：根据 OKX 接口监控本人持仓保证金率并自动追加"
+    )
+    margin_add_max_times: Optional[int] = Field(
+        None,
+        ge=1,
+        le=100_000,
+        description="保证金自动追加次数上限；不传或 null 表示不限制",
     )
 
 
@@ -56,9 +59,11 @@ class FollowAccountOut(BaseModel):
     bet_amount_per_position: Optional[Decimal] = None
     max_follow_positions: Optional[int] = None
     bet_mode: str = Field(default="cost", description="cost=按成本下单")
-    margin_ratio_threshold_pct: Decimal = Field(default=Decimal("200"))
     margin_add_ratio_of_bet: Decimal = Field(default=Decimal("0.2"))
     margin_auto_enabled: bool = False
+    margin_add_max_times: Optional[int] = Field(
+        None, description="保证金自动追加次数上限；null 表示不限制"
+    )
 
     @field_serializer("last_enabled_at", "created_at", "positions_refreshed_at")
     def _dt_beijing(self, v: datetime | None) -> datetime | None:

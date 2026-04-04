@@ -33,10 +33,9 @@ class FollowAccount(Base):
     # 最多同时跟 n 个仓位：对方少于 n 则全跟；多于 n 则只跟 n；对方换仓时动态仍不超过 n。
     max_follow_positions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bet_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="cost")
-    margin_ratio_threshold_pct: Mapped[Decimal] = mapped_column(
-        Numeric(12, 4), nullable=False, default=Decimal("200")
-    )
     margin_add_ratio_of_bet: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, default=Decimal("0.2")
     )
     margin_auto_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 本人持仓保证金自动追加：最多允许追加的次数；NULL 表示不限制（由监控实际执行）。
+    margin_add_max_times: Mapped[int | None] = mapped_column(Integer, nullable=True)

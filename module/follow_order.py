@@ -11,6 +11,7 @@ OKX v5 私有接口（跟单账户）：统一使用 .env 中 OKX_FOLLOW_* 凭�
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -27,9 +28,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _BACKEND_ROOT / ".env"
 
-_OKX_REST = "https://www.okx.com"
 _PLACE_ORDER_PATH = "/api/v5/trade/order"
 _MARGIN_BALANCE_PATH = "/api/v5/account/position/margin-balance"
+
+_DEFAULT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=15)
 
 
 class FollowOrderConfig(BaseSettings):
@@ -44,11 +46,11 @@ class FollowOrderConfig(BaseSettings):
     OKX_FOLLOW_API_KEY: str = ""
     OKX_FOLLOW_SECRET_KEY: str = ""
     OKX_FOLLOW_PASSPHRASE: str = ""
-    """为 True 时加请求头 x-simulated-trading: 1（模拟盘）。"""
     OKX_FOLLOW_USE_PAPER: bool = False
 
     OKX_FOLLOW_API_WHITELIST_IP: str = ""
     OKX_FOLLOW_API_LABEL: str = ""
+    OKX_FOLLOW_REST_BASE: str = "https://www.okx.com"
 
     def is_configured(self) -> bool:
         return bool(
@@ -101,6 +103,20 @@ class OkxFollowOrderClient:
     def _not_configured_response(self) -> tuple[bool, dict[str, str]]:
         return False, {"msg": "OKX 跟单 API 未配置（需 OKX_FOLLOW_* 环境变量）"}
 
+    def _rest_base(self) -> str:
+        return (self._cfg.OKX_FOLLOW_REST_BASE or "https://www.okx.com").strip().rstrip("/")
+
+    def _connect_error_payload(self, exc: BaseException) -> dict[str, str]:
+        return {
+            "msg": "无法连接 OKX（网络或 DNS 异常）",
+            "detail": str(exc),
+            "hint": (
+                "若 detail 中出现 169.254.x.x，说明 www.okx.com 被错误解析，请检查本机 hosts、DNS、"
+                "代理/VPN；可在服务器执行 nslookup www.okx.com 核对。也可在 .env 设置 OKX_FOLLOW_REST_BASE "
+                "为当前环境可访问的 OKX API 域名（需与官方文档一致）。"
+            ),
+        }
+
     def _build_body(self, params: dict[str, Any]) -> str:
         payload = {k: v for k, v in params.items() if v is not None}
         return json.dumps(payload, separators=(",", ":"))
@@ -120,12 +136,33 @@ class OkxFollowOrderClient:
         if not self._cfg.is_configured():
             return self._not_configured_response()
 
-        url = _OKX_REST + request_path
+        url = self._rest_base() + request_path
         headers = self._headers("GET", request_path, "")
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                return await self._parse_http_json(resp)
+        try:
+            async with aiohttp.ClientSession(timeout=_DEFAULT_HTTP_TIMEOUT) as session:
+                async with session.get(url, headers=headers) as resp:
+                    return await self._parse_http_json(resp)
+        except asyncio.TimeoutError:
+            return False, {"msg": "连接 OKX 超时", "hint": "检查网络、防火墙或代理"}
+        except aiohttp.ClientError as e:
+            return False, self._connect_error_payload(e)
+
+    async def _post(self, request_path: str, body: str) -> tuple[bool, Any]:
+        if not self._cfg.is_configured():
+            return self._not_configured_response()
+
+        url = self._rest_base() + request_path
+        headers = self._headers("POST", request_path, body)
+
+        try:
+            async with aiohttp.ClientSession(timeout=_DEFAULT_HTTP_TIMEOUT) as session:
+                async with session.post(url, headers=headers, data=body.encode("utf-8")) as resp:
+                    return await self._parse_http_json(resp)
+        except asyncio.TimeoutError:
+            return False, {"msg": "连接 OKX 超时", "hint": "检查网络、防火墙或代理"}
+        except aiohttp.ClientError as e:
+            return False, self._connect_error_payload(e)
 
     async def get_trade_fills(
         self,
@@ -164,22 +201,11 @@ class OkxFollowOrderClient:
 
     async def get_positions_inst(self, inst_type: str = "SWAP") -> tuple[bool, Any]:
         """GET /api/v5/account/positions"""
-        if not self._cfg.is_configured():
-            return self._not_configured_response()
-
         path = f"/api/v5/account/positions?instType={inst_type}"
-        url = _OKX_REST + path
-        headers = self._headers("GET", path, "")
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                return await self._parse_http_json(resp)
+        return await self._get(path)
 
     async def add_position_margin(self, inst_id: str, pos_side: str, amt: str) -> tuple[bool, Any]:
         """POST /api/v5/account/position/margin-balance，type=add 增加逐仓保证金。"""
-        if not self._cfg.is_configured():
-            return self._not_configured_response()
-
         body_obj: dict[str, Any] = {
             "instId": inst_id,
             "posSide": pos_side,
@@ -187,25 +213,12 @@ class OkxFollowOrderClient:
             "amt": amt,
         }
         body = json.dumps(body_obj, separators=(",", ":"))
-        url = _OKX_REST + _MARGIN_BALANCE_PATH
-        headers = self._headers("POST", _MARGIN_BALANCE_PATH, body)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, data=body.encode("utf-8")) as resp:
-                return await self._parse_http_json(resp)
+        return await self._post(_MARGIN_BALANCE_PATH, body)
 
     async def place_order(self, params: dict[str, Any]) -> tuple[bool, Any]:
         """POST /api/v5/trade/order"""
-        if not self._cfg.is_configured():
-            return self._not_configured_response()
-
         body = self._build_body(params)
-        url = _OKX_REST + _PLACE_ORDER_PATH
-        headers = self._headers("POST", _PLACE_ORDER_PATH, body)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, data=body.encode("utf-8")) as resp:
-                return await self._parse_http_json(resp)
+        return await self._post(_PLACE_ORDER_PATH, body)
 
 
 _default_client = OkxFollowOrderClient()

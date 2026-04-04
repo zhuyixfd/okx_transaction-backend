@@ -6,6 +6,27 @@ import aiohttp
 
 from config.cn_time import CN_TZ
 
+
+def pick_lever_from_pos(pos: dict) -> str:
+    """社区接口杠杆字段名可能是 lever、leverage、posLever 等；统一成字符串。"""
+    for key in (
+        "lever",
+        "leverage",
+        "posLever",
+        "leverRate",
+        "leverMult",
+        "leverageMultiple",
+        "leverMultiple",
+    ):
+        v = pos.get(key)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return ""
+
+
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -90,7 +111,7 @@ class OkxTrade:
                 ).strftime("%Y-%m-%d %H:%M:%S"),
                 "posCcy": pos["posCcy"],
                 "posSide": pos["posSide"],
-                "lever": pos["lever"],
+                "lever": pick_lever_from_pos(pos),
                 "avgPx": pos["avgPx"],
                 "last": pos["last"],
             })

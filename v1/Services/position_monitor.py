@@ -12,6 +12,7 @@ from config.cn_time import now_cn
 from config.constant import config as db_config
 from config.db import SessionLocal
 from okx import OkxTrade
+from okx.trade import pick_lever_from_pos
 from v1.Models.follow_account import FollowAccount
 from v1.Models.follow_position import FollowPositionEvent, FollowPositionSnapshot
 from v1.Models.follow_sim_record import FollowSimRecord
@@ -77,13 +78,16 @@ def _sim_eligible_pos_ids(
 
 
 def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
+    lev = str(p.get("lever", "")).strip()
+    if not lev:
+        lev = pick_lever_from_pos(p)
     return {
         "posId": str(p.get("posId", "")),
         "cTime": str(p.get("cTime", "")),
         "cTime_format": str(p.get("cTime_format", "")),
         "posCcy": str(p.get("posCcy", "")),
         "posSide": str(p.get("posSide", "")),
-        "lever": str(p.get("lever", "")),
+        "lever": lev,
         "avgPx": str(p.get("avgPx", "")),
         "last": str(p.get("last", "")),
     }

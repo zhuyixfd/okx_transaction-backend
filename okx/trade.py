@@ -83,6 +83,7 @@ class OkxTrade:
         lever: 倍数
         avgPx: 开仓均价
         last: 标记价格
+        uplRatio: 收益率
         """
         session = cls.get_session()
         async with session.get(
@@ -114,6 +115,7 @@ class OkxTrade:
                 "lever": pick_lever_from_pos(pos),
                 "avgPx": pos["avgPx"],
                 "last": pos["last"],
+                'uplRatio': pos['uplRatio'],
             })
         return res
 

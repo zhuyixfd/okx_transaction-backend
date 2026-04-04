@@ -297,6 +297,10 @@ class OkxFollowOrderClient:
         path = f"/api/v5/account/positions?instType={inst_type}"
         return await self._get(path)
 
+    async def get_account_config(self) -> tuple[bool, Any]:
+        """GET /api/v5/account/config（含 acctLv、posMode 等）。"""
+        return await self._get("/api/v5/account/config")
+
     async def add_position_margin(self, inst_id: str, pos_side: str, amt: str) -> tuple[bool, Any]:
         """POST /api/v5/account/position/margin-balance，type=add 增加逐仓保证金。"""
         body_obj: dict[str, Any] = {

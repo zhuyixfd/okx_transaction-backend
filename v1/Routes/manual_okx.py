@@ -41,6 +41,29 @@ def margin_ccy_from_inst_id(inst_id: str) -> str:
     return "USDT"
 
 
+# OKX 文档：逐仓 isolated 在跨币种(3)、组合保证金(4)账户下不可用，否则会报 Parameter mgnMode 类错误。
+_ACCT_LV_NO_ISOLATED = frozenset({"3", "4"})
+
+
+def _effective_td_mode_for_account(requested: str, acct_lv: str | None) -> str:
+    if requested == "isolated" and acct_lv in _ACCT_LV_NO_ISOLATED:
+        return "cross"
+    return requested
+
+
+def _parse_acct_lv_from_config(cfg_data: Any) -> str | None:
+    if not isinstance(cfg_data, dict) or str(cfg_data.get("code")) != "0":
+        return None
+    rows = cfg_data.get("data")
+    if not isinstance(rows, list) or not rows:
+        return None
+    first = rows[0]
+    if not isinstance(first, dict):
+        return None
+    lv = first.get("acctLv")
+    return str(lv) if lv is not None and str(lv) != "" else None
+
+
 class ContractOrderBody(BaseModel):
     """市价开仓；固定为双向（开平仓）模式：posSide=long/short。"""
 
@@ -92,6 +115,10 @@ async def post_contract_order(
     side = "buy" if body.direction == "long" else "sell"
     pos_side = "long" if body.direction == "long" else "short"
 
+    ok_cfg, cfg_data = await _client.get_account_config()
+    acct_lv = _parse_acct_lv_from_config(cfg_data) if ok_cfg else None
+    td_mode = _effective_td_mode_for_account(body.td_mode, acct_lv)
+
     ok_pm, pm_data = await _client.set_position_mode("long_short_mode")
     # 59000：有挂单/持仓/机器人时 OKX 拒绝改持仓模式；若已是开平仓模式仍可下单，故不阻断。
     if not ok_pm:
@@ -112,13 +139,13 @@ async def post_contract_order(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="lever 须在 1～125 之间",
             )
-        lev_pos: str | None = pos_side if body.td_mode == "isolated" else None
+        lev_pos: str | None = pos_side if td_mode == "isolated" else None
         ok_lev, lev_data = await _client.set_leverage(
             inst_id,
             str(lv),
-            body.td_mode,
+            td_mode,
             pos_side=lev_pos,
-            ccy=margin_ccy_from_inst_id(inst_id) if body.td_mode == "isolated" else None,
+            ccy=margin_ccy_from_inst_id(inst_id) if td_mode == "isolated" else None,
         )
         if not ok_lev:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=lev_data)
@@ -135,13 +162,13 @@ async def post_contract_order(
 
     order_payload: dict[str, Any] = {
         "instId": inst_id,
-        "tdMode": body.td_mode,
+        "tdMode": td_mode,
         "side": side,
         "ordType": "market",
         "sz": sz_str,
         "posSide": pos_side,
     }
-    if "-SWAP" in inst_id.upper() and body.td_mode == "isolated":
+    if "-SWAP" in inst_id.upper() and td_mode == "isolated":
         order_payload["ccy"] = margin_ccy_from_inst_id(inst_id)
 
     ok, data = await _client.place_order(order_payload)

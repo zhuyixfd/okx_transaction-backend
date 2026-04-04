@@ -51,21 +51,25 @@ def _effective_td_mode_for_account(requested: str, acct_lv: str | None) -> str:
     return requested
 
 
-def _parse_acct_lv_from_config(cfg_data: Any) -> str | None:
+def _parse_account_config_fields(cfg_data: Any) -> tuple[str | None, str | None]:
+    """返回 (acctLv, posMode)。posMode 为 net_mode 时下单/设杠杆不得传 long/short 的 posSide。"""
     if not isinstance(cfg_data, dict) or str(cfg_data.get("code")) != "0":
-        return None
+        return None, None
     rows = cfg_data.get("data")
     if not isinstance(rows, list) or not rows:
-        return None
+        return None, None
     first = rows[0]
     if not isinstance(first, dict):
-        return None
+        return None, None
     lv = first.get("acctLv")
-    return str(lv) if lv is not None and str(lv) != "" else None
+    acct_lv = str(lv) if lv is not None and str(lv) != "" else None
+    pm = first.get("posMode")
+    pos_mode = str(pm).strip() if pm is not None and str(pm).strip() != "" else None
+    return acct_lv, pos_mode
 
 
 class ContractOrderBody(BaseModel):
-    """市价开仓；固定为双向（开平仓）模式：posSide=long/short。"""
+    """市价开仓；根据账户 posMode 自动选择是否带 posSide（开平仓 long/short，单向 net 不传）。"""
 
     symbol: str = Field(
         ...,
@@ -116,8 +120,12 @@ async def post_contract_order(
     pos_side = "long" if body.direction == "long" else "short"
 
     ok_cfg, cfg_data = await _client.get_account_config()
-    acct_lv = _parse_acct_lv_from_config(cfg_data) if ok_cfg else None
+    acct_lv, cfg_pos_mode = (
+        _parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+    )
     td_mode = _effective_td_mode_for_account(body.td_mode, acct_lv)
+    # 以 config 为准：单向 net_mode 下传 long/short 的 posSide 会触发 Parameter mgnMode 等错误
+    hedge_mode = cfg_pos_mode != "net_mode"
 
     ok_pm, pm_data = await _client.set_position_mode("long_short_mode")
     # 59000：有挂单/持仓/机器人时 OKX 拒绝改持仓模式；若已是开平仓模式仍可下单，故不阻断。
@@ -139,16 +147,22 @@ async def post_contract_order(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="lever 须在 1～125 之间",
             )
-        lev_pos: str | None = pos_side if td_mode == "isolated" else None
+        lev_pos: str | None = (
+            pos_side if td_mode == "isolated" and hedge_mode else None
+        )
+        # set-leverage：若传 ccy 则 mgnMode 只能为 cross（官方表）；逐仓永续示例不含 ccy。
         ok_lev, lev_data = await _client.set_leverage(
             inst_id,
             str(lv),
             td_mode,
             pos_side=lev_pos,
-            ccy=margin_ccy_from_inst_id(inst_id) if td_mode == "isolated" else None,
+            ccy=None,
         )
         if not ok_lev:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=lev_data)
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail={"step": "set_leverage", "okx": lev_data},
+            )
 
     ok_sz, sz_or_err = await _client.swap_sz_from_usdt_principal(
         inst_id, body.principal_usdt.strip()
@@ -166,14 +180,18 @@ async def post_contract_order(
         "side": side,
         "ordType": "market",
         "sz": sz_str,
-        "posSide": pos_side,
     }
+    if hedge_mode:
+        order_payload["posSide"] = pos_side
     if "-SWAP" in inst_id.upper() and td_mode == "isolated":
         order_payload["ccy"] = margin_ccy_from_inst_id(inst_id)
 
     ok, data = await _client.place_order(order_payload)
     if not ok:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=data)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail={"step": "place_order", "okx": data},
+        )
     return data  # type: ignore[return-value]
 
 

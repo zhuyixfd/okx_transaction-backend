@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import os
+import secrets
 import time
 from typing import Optional
 
@@ -11,8 +12,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from config.db import get_db
 from config.constant import config as db_config
+from config.db import SessionLocal, get_db
 from v1.Models.user import User
 from v1.Schema.auth import LoginRequest, LoginResponse, MeResponse
 
@@ -25,6 +26,45 @@ def ensure_mysql_db_configured() -> None:
             status_code=status.HTTP_424_FAILED_DEPENDENCY,
             detail="MYSQL_DB 未配置：请在 backend/.env 中填写要使用的数据库名后重启",
         )
+
+
+DEFAULT_BOOTSTRAP_USERNAME = "admin"
+DEFAULT_BOOTSTRAP_PASSWORD = "admin123"
+
+
+def ensure_default_admin_user() -> None:
+    """
+    init_db / 建表之后：若不存在用户名为 admin 的帐号，则创建一条。
+    密码与 DEFAULT_BOOTSTRAP_PASSWORD 一致，哈希方式与 /auth/login 相同。
+    """
+    if not db_config.MYSQL_DB:
+        return
+    db = SessionLocal()
+    try:
+        existing = db.execute(
+            select(User).where(User.username == DEFAULT_BOOTSTRAP_USERNAME)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
+        salt = secrets.token_hex(16)
+        pwd_hash = pbkdf2_hash_password(DEFAULT_BOOTSTRAP_PASSWORD, salt=salt)
+        db.add(
+            User(
+                username=DEFAULT_BOOTSTRAP_USERNAME,
+                salt=salt,
+                password_hash=pwd_hash,
+            )
+        )
+        db.commit()
+        print(
+            f"[startup] 已自动创建默认用户 {DEFAULT_BOOTSTRAP_USERNAME!r}，"
+            f"初始密码 {DEFAULT_BOOTSTRAP_PASSWORD!r}，生产环境请尽快修改"
+        )
+    except Exception as e:
+        db.rollback()
+        print(f"[startup] ensure_default_admin_user 失败: {e!r}")
+    finally:
+        db.close()
 
 
 def pbkdf2_hash_password(password: str, salt: str, iterations: int = 100_000) -> str:

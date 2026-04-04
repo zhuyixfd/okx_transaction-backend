@@ -1,5 +1,6 @@
 -- 全库表结构初始化：先删表再建表（会清空数据）。
 -- 使用方式：mysql -u... -p... 目标库 < sql/init.sql
+-- 默认管理员 admin / admin123：由应用启动 init_db() 后自动写入（users 中尚无 admin 时），本脚本不 INSERT。
 
 USE okx;
 SET NAMES utf8mb4;

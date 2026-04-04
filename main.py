@@ -16,7 +16,7 @@ from v1.Models import (  # noqa: F401 — register model metadata for init_db()
     User,
 )
 from v1.Routes.follow_accounts import router as follow_accounts_router
-from v1.Routes.auth import router as auth_router
+from v1.Routes.auth import ensure_default_admin_user, router as auth_router
 
 app = app
 
@@ -28,12 +28,13 @@ app.include_router(auth_router)
 async def on_startup() -> None:
     import asyncio
 
-    # 仅建表，不写入任何业务假数据。
+    # 建表；若无 admin 用户则自动创建（与 migrate/init 等价的一次性引导）。
     try:
         if not db_config.MYSQL_DB:
             print("[startup] MYSQL_DB is empty; skipping init_db.")
         else:
             init_db()
+            ensure_default_admin_user()
     except Exception as e:
         print(f"[startup] init_db failed: {e!r}")
 

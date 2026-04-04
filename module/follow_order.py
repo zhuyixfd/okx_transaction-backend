@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 from datetime import datetime, timezone
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -165,6 +166,96 @@ class OkxFollowOrderClient:
         except aiohttp.ClientError as e:
             return False, self._connect_error_payload(e)
 
+    async def _get_public(self, request_path: str) -> tuple[bool, Any]:
+        """公共接口，无需 API Key（用于按 USDT 本金换算张数）。"""
+        url = self._rest_base() + request_path
+        try:
+            async with aiohttp.ClientSession(timeout=_DEFAULT_HTTP_TIMEOUT) as session:
+                async with session.get(url) as resp:
+                    return await self._parse_http_json(resp)
+        except asyncio.TimeoutError:
+            return False, {"msg": "连接 OKX 超时"}
+        except aiohttp.ClientError as e:
+            return False, self._connect_error_payload(e)
+
+    def _fmt_okx_sz(self, d: Decimal) -> str:
+        s = format(d.normalize(), "f")
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s if s else "0"
+
+    async def swap_sz_from_usdt_principal(
+        self,
+        inst_id: str,
+        principal_usdt_str: str,
+    ) -> tuple[bool, str | dict[str, Any]]:
+        """
+        U 本位 linear 永续：名义 USDT ≈ 张数 × ctVal × 标记价，向下取整到 lotSz。
+        """
+        try:
+            principal = Decimal(str(principal_usdt_str).strip())
+        except InvalidOperation:
+            return False, {"msg": "本金 USDT 格式无效"}
+        if principal <= 0:
+            return False, {"msg": "本金须大于 0"}
+
+        q_inst = urlencode({"instType": "SWAP", "instId": inst_id.strip().upper()})
+        ok_i, raw_i = await self._get_public(f"/api/v5/public/instruments?{q_inst}")
+        if not ok_i:
+            return False, raw_i if isinstance(raw_i, dict) else {"msg": str(raw_i)}
+        rows = raw_i.get("data") if isinstance(raw_i, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return False, {"msg": "未找到合约信息", "instId": inst_id}
+        inst = rows[0]
+        if not isinstance(inst, dict):
+            return False, {"msg": "合约数据异常"}
+        ct_type = str(inst.get("ctType") or "").lower()
+        if ct_type != "linear":
+            return False, {
+                "msg": "当前仅支持 U 本位（linear）永续按本金下单",
+                "ctType": ct_type or "unknown",
+            }
+        try:
+            ct_val = Decimal(str(inst.get("ctVal") or "0"))
+            lot_sz = Decimal(str(inst.get("lotSz") or "1"))
+            min_sz = Decimal(str(inst.get("minSz") or "1"))
+        except InvalidOperation:
+            return False, {"msg": "合约 lotSz/ctVal 解析失败"}
+        if ct_val <= 0 or lot_sz <= 0:
+            return False, {"msg": "合约 ctVal/lotSz 无效"}
+
+        q_t = urlencode({"instId": inst_id.strip().upper()})
+        ok_t, raw_t = await self._get_public(f"/api/v5/market/ticker?{q_t}")
+        if not ok_t:
+            return False, raw_t if isinstance(raw_t, dict) else {"msg": str(raw_t)}
+        trows = raw_t.get("data") if isinstance(raw_t, dict) else None
+        if not isinstance(trows, list) or not trows:
+            return False, {"msg": "未取到行情", "instId": inst_id}
+        tick = trows[0]
+        if not isinstance(tick, dict):
+            return False, {"msg": "行情数据异常"}
+        px_s = tick.get("markPx") or tick.get("last") or tick.get("idxPx") or ""
+        try:
+            px = Decimal(str(px_s).strip())
+        except InvalidOperation:
+            return False, {"msg": "标记价/最新价无效", "raw": str(px_s)[:32]}
+        if px <= 0:
+            return False, {"msg": "价格无效"}
+
+        denom = ct_val * px
+        sz_raw = principal / denom
+        steps = (sz_raw / lot_sz).to_integral_value(rounding=ROUND_DOWN)
+        sz_adj = steps * lot_sz
+        if sz_adj <= 0 or sz_adj < min_sz:
+            return False, {
+                "msg": "按当前价计算张数低于最小下单量，请提高本金",
+                "minSz": str(min_sz),
+                "lotSz": str(lot_sz),
+                "computedSz": self._fmt_okx_sz(sz_adj),
+                "markPx": str(px),
+            }
+        return True, self._fmt_okx_sz(sz_adj)
+
     async def get_trade_fills(
         self,
         *,
@@ -223,6 +314,7 @@ class OkxFollowOrderClient:
         mgn_mode: str,
         *,
         pos_side: str | None = None,
+        ccy: str | None = None,
     ) -> tuple[bool, Any]:
         """
         POST /api/v5/account/set-leverage。
@@ -235,6 +327,8 @@ class OkxFollowOrderClient:
         }
         if pos_side:
             obj["posSide"] = pos_side
+        if ccy:
+            obj["ccy"] = ccy.strip()
         body = json.dumps(obj, separators=(",", ":"))
         return await self._post(_SET_LEVERAGE_PATH, body)
 

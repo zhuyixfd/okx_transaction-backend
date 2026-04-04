@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
@@ -34,22 +34,31 @@ def normalize_swap_inst_id(raw: str) -> str:
     return f"{s}-USDT-SWAP"
 
 
-class ContractOrderBody(BaseModel):
-    """
-    市价开仓。
-    - position_mode=net（单向/买卖模式）：posSide 必须为 net；做多 buy，做空 sell。
-    - position_mode=hedge（双向/开平仓模式）：posSide 为 long 或 short，与 side 对应。
-    """
+def margin_ccy_from_inst_id(inst_id: str) -> str:
+    parts = inst_id.strip().upper().split("-")
+    if len(parts) >= 2 and parts[1]:
+        return parts[1]
+    return "USDT"
 
-    symbol: str = Field(..., min_length=1, max_length=64, description="如 BTC 或 BTC-USDT-SWAP")
-    sz: str = Field(..., min_length=1, max_length=32, description="委托数量，U 本位永续一般为张数")
+
+class ContractOrderBody(BaseModel):
+    """市价开仓；固定为双向（开平仓）模式：posSide=long/short。"""
+
+    symbol: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="币种简称如 DOGE，或无横杠则自动补全为 {SYMBOL}-USDT-SWAP",
+    )
+    principal_usdt: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        description="开仓本金（USDT 名义），后端按标记价与 ctVal 换算为张数 sz",
+    )
     direction: Literal["long", "short"] = Field(
         ...,
-        description="做多或做空（在 net 下仅决定 buy/sell，在 hedge 下还决定 posSide）",
-    )
-    position_mode: Literal["net", "hedge"] = Field(
-        default="net",
-        description="与欧易账户持仓模式一致；多数账户为 net，误用 hedge 会报 posSide 错误",
+        description="做多 buy+long，做空 sell+short",
     )
     td_mode: str = Field(default="isolated", pattern="^(isolated|cross)$")
     lever: str | None = Field(
@@ -80,12 +89,8 @@ async def post_contract_order(
 ) -> dict:
     _ensure_okx()
     inst_id = normalize_swap_inst_id(body.symbol)
-    if body.position_mode == "net":
-        side = "buy" if body.direction == "long" else "sell"
-        pos_side = "net"
-    else:
-        side = "buy" if body.direction == "long" else "sell"
-        pos_side = "long" if body.direction == "long" else "short"
+    side = "buy" if body.direction == "long" else "sell"
+    pos_side = "long" if body.direction == "long" else "short"
 
     if body.lever is not None:
         try:
@@ -100,28 +105,39 @@ async def post_contract_order(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="lever 须在 1～125 之间",
             )
-        lev_pos: str | None = None
-        if body.td_mode == "isolated" and body.position_mode == "hedge":
-            lev_pos = pos_side
+        lev_pos: str | None = pos_side if body.td_mode == "isolated" else None
         ok_lev, lev_data = await _client.set_leverage(
             inst_id,
             str(lv),
             body.td_mode,
             pos_side=lev_pos,
+            ccy=margin_ccy_from_inst_id(inst_id) if body.td_mode == "isolated" else None,
         )
         if not ok_lev:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=lev_data)
 
-    ok, data = await _client.place_order(
-        {
-            "instId": inst_id,
-            "tdMode": body.td_mode,
-            "side": side,
-            "ordType": "market",
-            "sz": body.sz.strip(),
-            "posSide": pos_side,
-        }
+    ok_sz, sz_or_err = await _client.swap_sz_from_usdt_principal(
+        inst_id, body.principal_usdt.strip()
     )
+    if not ok_sz:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=sz_or_err if isinstance(sz_or_err, dict) else {"msg": str(sz_or_err)},
+        )
+    sz_str = str(sz_or_err)
+
+    order_payload: dict[str, Any] = {
+        "instId": inst_id,
+        "tdMode": body.td_mode,
+        "side": side,
+        "ordType": "market",
+        "sz": sz_str,
+        "posSide": pos_side,
+    }
+    if "-SWAP" in inst_id.upper():
+        order_payload["ccy"] = margin_ccy_from_inst_id(inst_id)
+
+    ok, data = await _client.place_order(order_payload)
     if not ok:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=data)
     return data  # type: ignore[return-value]

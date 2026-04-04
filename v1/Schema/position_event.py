@@ -19,6 +19,10 @@ class PositionEventOut(BaseModel):
     lever: Optional[str] = None
     avg_px: Optional[str] = None
     last_px: Optional[str] = None
+    upl_ratio: Optional[str] = Field(
+        None,
+        description="从 detail_json 解析的 uplRatio（新写入的事件才有；历史行可能为空）",
+    )
     c_time: Optional[str] = None
     detail_json: Optional[str] = None
     created_at: datetime

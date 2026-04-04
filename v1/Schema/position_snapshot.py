@@ -19,6 +19,10 @@ class PositionSnapshotItem(BaseModel):
     lever: Optional[str] = None
     avg_px: Optional[str] = None
     last_px: Optional[str] = None
+    upl_ratio: Optional[str] = Field(
+        None,
+        description="接口 uplRatio，写入快照 JSON；与按价计算的收益率可能一致或含杠杆口径",
+    )
 
 
 class PositionSnapshotOut(BaseModel):

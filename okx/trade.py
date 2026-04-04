@@ -113,9 +113,13 @@ class OkxTrade:
                 "posCcy": pos["posCcy"],
                 "posSide": pos["posSide"],
                 "lever": pick_lever_from_pos(pos),
-                "avgPx": pos["avgPx"],
-                "last": pos["last"],
-                'uplRatio': pos['uplRatio'],
+                "avgPx": pos.get("avgPx"),
+                "last": pos.get("last"),
+                "uplRatio": (
+                    ""
+                    if pos.get("uplRatio") is None
+                    else str(pos.get("uplRatio")).strip()
+                ),
             })
         return res
 

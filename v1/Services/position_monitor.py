@@ -81,6 +81,10 @@ def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
     lev = str(p.get("lever", "")).strip()
     if not lev:
         lev = pick_lever_from_pos(p)
+    ur = p.get("uplRatio")
+    if ur is None:
+        ur = p.get("upl_ratio")
+    upl_ratio_s = "" if ur is None else str(ur).strip()
     return {
         "posId": str(p.get("posId", "")),
         "cTime": str(p.get("cTime", "")),
@@ -90,6 +94,7 @@ def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
         "lever": lev,
         "avgPx": str(p.get("avgPx", "")),
         "last": str(p.get("last", "")),
+        "uplRatio": upl_ratio_s,
     }
 
 

@@ -1,7 +1,7 @@
 """
 轮询本人 OKX 永续持仓保证金率：当 mgnRatio ≤ 内置阈值（200%）时，按「下注金额 × 追加比例」追加逐仓保证金。
 
-需配置环境变量 OKX_API_KEY / OKX_SECRET_KEY / OKX_PASSPHRASE；
+需配置环境变量 OKX_FOLLOW_API_KEY / OKX_FOLLOW_SECRET_KEY / OKX_FOLLOW_PASSPHRASE；
 至少一条 follow_accounts 记录开启 margin_auto_enabled 且填写 bet_amount_per_position。
 
 多帐户同时启用时：取下注金额、追加比例中的最小值（偏保守）。
@@ -18,8 +18,7 @@ from sqlalchemy.orm import Session
 
 from config.constant import config as db_config
 from config.db import SessionLocal
-from config.okx_private import okx_private_config
-from module.private_api import add_position_margin, get_positions_inst
+from module.follow_order import add_position_margin, follow_order_config, get_positions_inst
 from v1.Models.follow_account import FollowAccount
 
 _last_add_ts: dict[tuple[str, str], float] = {}
@@ -59,7 +58,7 @@ def _aggregate_config(db: Session) -> dict[str, Decimal] | None:
 async def margin_monitor_loop() -> None:
     while True:
         try:
-            if not db_config.MYSQL_DB or not okx_private_config.is_configured():
+            if not db_config.MYSQL_DB or not follow_order_config.is_configured():
                 await asyncio.sleep(30)
                 continue
 

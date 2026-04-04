@@ -17,11 +17,13 @@ from v1.Models import (  # noqa: F401 — register model metadata for init_db()
 )
 from v1.Routes.follow_accounts import router as follow_accounts_router
 from v1.Routes.auth import ensure_default_admin_user, router as auth_router
+from v1.Routes.manual_okx import router as manual_okx_router
 
 app = app
 
 app.include_router(follow_accounts_router)
 app.include_router(auth_router)
+app.include_router(manual_okx_router)
 
 
 @app.on_event("startup")

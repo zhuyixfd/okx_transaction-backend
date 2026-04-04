@@ -16,11 +16,16 @@ import hashlib
 import hmac
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 import aiohttp
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 与相对 CWD 的 ".env" 不同：始终读 backend/.env（避免从仓库根目录启动时读不到）
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_ENV_PATH = _BACKEND_ROOT / ".env"
 
 _OKX_REST = "https://www.okx.com"
 _PLACE_ORDER_PATH = "/api/v5/trade/order"
@@ -31,7 +36,7 @@ class FollowOrderConfig(BaseSettings):
     """跟单账户 OKX API：下单、查持仓、调整保证金均读此配置。"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_PATH,
         env_file_encoding="utf-8",
         extra="ignore",
     )

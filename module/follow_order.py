@@ -189,16 +189,21 @@ class OkxFollowOrderClient:
         self,
         inst_id: str,
         principal_usdt_str: str,
+        *,
+        leverage: int,
     ) -> tuple[bool, str | dict[str, Any]]:
         """
-        U 本位 linear 永续：名义 USDT ≈ 张数 × ctVal × 标记价，向下取整到 lotSz。
+        U 本位 linear 永续：保证金(USDT) × 杠杆 = 目标名义，名义 ≈ 张数 × ctVal × 标记价，向下取整到 lotSz。
         """
         try:
-            principal = Decimal(str(principal_usdt_str).strip())
+            margin = Decimal(str(principal_usdt_str).strip())
         except InvalidOperation:
             return False, {"msg": "本金 USDT 格式无效"}
-        if principal <= 0:
+        if margin <= 0:
             return False, {"msg": "本金须大于 0"}
+        if leverage < 1:
+            return False, {"msg": "杠杆须为不小于 1 的整数"}
+        notional = margin * Decimal(leverage)
 
         q_inst = urlencode({"instType": "SWAP", "instId": inst_id.strip().upper()})
         ok_i, raw_i = await self._get_public(f"/api/v5/public/instruments?{q_inst}")
@@ -244,12 +249,12 @@ class OkxFollowOrderClient:
             return False, {"msg": "价格无效"}
 
         denom = ct_val * px
-        sz_raw = principal / denom
+        sz_raw = notional / denom
         steps = (sz_raw / lot_sz).to_integral_value(rounding=ROUND_DOWN)
         sz_adj = steps * lot_sz
         if sz_adj <= 0 or sz_adj < min_sz:
             return False, {
-                "msg": "按当前价计算张数低于最小下单量，请提高本金",
+                "msg": "按当前价计算张数低于最小下单量，请提高本金或杠杆",
                 "minSz": str(min_sz),
                 "lotSz": str(lot_sz),
                 "computedSz": self._fmt_okx_sz(sz_adj),
@@ -262,17 +267,20 @@ class OkxFollowOrderClient:
         inst_id: str,
         principal_usdt: str,
         *,
+        leverage: int,
         td_mode: str,
         side: str,
         pos_side: str | None = None,
     ) -> tuple[bool, Any]:
         """
-        U 本位永续市价开仓：数量仅接受 principal_usdt（USDT 名义），内部换算张数后调 place_order。
+        U 本位永续市价开仓：principal_usdt 为保证金(USDT)，名义 = 保证金 × leverage，再换张数下单。
         成功: (True, OKX 下单响应体)
         失败: (False, ("sz", detail)) 换算失败；(False, ("place", detail)) 下单失败
         """
         ok_sz, sz_or_err = await self.swap_sz_from_usdt_principal(
-            inst_id, principal_usdt.strip()
+            inst_id,
+            principal_usdt.strip(),
+            leverage=leverage,
         )
         if not ok_sz:
             return False, ("sz", sz_or_err)
@@ -339,6 +347,11 @@ class OkxFollowOrderClient:
     async def get_account_config(self) -> tuple[bool, Any]:
         """GET /api/v5/account/config（含 acctLv、posMode 等）。"""
         return await self._get("/api/v5/account/config")
+
+    async def get_leverage_info(self, inst_id: str, mgn_mode: str) -> tuple[bool, Any]:
+        """GET /api/v5/account/leverage-info"""
+        q = urlencode({"instId": inst_id.strip().upper(), "mgnMode": mgn_mode.strip()})
+        return await self._get(f"/api/v5/account/leverage-info?{q}")
 
     async def add_position_margin(self, inst_id: str, pos_side: str, amt: str) -> tuple[bool, Any]:
         """POST /api/v5/account/position/margin-balance，type=add 增加逐仓保证金。"""

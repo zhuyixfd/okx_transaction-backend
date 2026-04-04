@@ -61,6 +61,49 @@ def _parse_account_config_fields(cfg_data: Any) -> tuple[str | None, str | None]
     return acct_lv, pos_mode
 
 
+def _sizing_lever_from_leverage_info(
+    li_data: Any,
+    *,
+    hedge_mode: bool,
+    pos_side: str,
+) -> int | None:
+    """从 GET /api/v5/account/leverage-info 响应中取用于算名义的杠杆（开平仓优先匹配 posSide）。"""
+    if not isinstance(li_data, dict) or str(li_data.get("code")) != "0":
+        return None
+    rows = li_data.get("data")
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    def row_lever(r: object) -> int | None:
+        if not isinstance(r, dict):
+            return None
+        v = r.get("lever")
+        if v is None or str(v).strip() == "":
+            return None
+        try:
+            x = int(float(str(v).strip()))
+        except ValueError:
+            return None
+        return x if x >= 1 else None
+
+    if hedge_mode:
+        for r in rows:
+            if isinstance(r, dict) and r.get("posSide") == pos_side:
+                lv = row_lever(r)
+                if lv is not None:
+                    return lv
+    for r in rows:
+        if isinstance(r, dict) and r.get("posSide") == "net":
+            lv = row_lever(r)
+            if lv is not None:
+                return lv
+    for r in rows:
+        lv = row_lever(r)
+        if lv is not None:
+            return lv
+    return None
+
+
 class ContractOrderBody(BaseModel):
     """市价开仓；根据账户 posMode 自动选择是否带 posSide（开平仓 long/short，单向 net 不传）。"""
 
@@ -74,7 +117,7 @@ class ContractOrderBody(BaseModel):
         ...,
         min_length=1,
         max_length=32,
-        description="开仓本金（USDT 名义），后端按标记价与 ctVal 换算为张数 sz",
+        description="开仓保证金/本金（USDT）；名义仓位 = 本金 × 杠杆，再换算张数",
     )
     direction: Literal["long", "short"] = Field(
         ...,
@@ -84,7 +127,7 @@ class ContractOrderBody(BaseModel):
     lever: str | None = Field(
         default=None,
         max_length=16,
-        description="杠杆倍数；填写则先于下单调用 POST /api/v5/account/set-leverage",
+        description="杠杆倍数；填写则先 set-leverage，且用于 本金×杠杆 算名义。不填则读当前合约杠杆",
     )
 
     @field_validator("lever", mode="before")
@@ -127,6 +170,7 @@ async def post_contract_order(
         if pm_code != "59000":
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=pm_data)
 
+    sizing_lever: int
     if body.lever is not None:
         try:
             lv = int(body.lever)
@@ -140,6 +184,7 @@ async def post_contract_order(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="lever 须在 1～125 之间",
             )
+        sizing_lever = lv
         lev_pos: str | None = (
             pos_side if td_mode == "isolated" and hedge_mode else None
         )
@@ -156,10 +201,29 @@ async def post_contract_order(
                 status.HTTP_502_BAD_GATEWAY,
                 detail={"step": "set_leverage", "okx": lev_data},
             )
+    else:
+        ok_li, li_data = await _client.get_leverage_info(inst_id, td_mode)
+        if not ok_li:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                detail={"step": "get_leverage_info", "okx": li_data},
+            )
+        picked = _sizing_lever_from_leverage_info(
+            li_data,
+            hedge_mode=hedge_mode,
+            pos_side=pos_side,
+        )
+        if picked is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="无法读取当前合约杠杆，请在本单填写 lever",
+            )
+        sizing_lever = picked
 
     ok_order, payload = await _client.place_swap_market_by_principal_usdt(
         inst_id,
         body.principal_usdt.strip(),
+        leverage=sizing_lever,
         td_mode=td_mode,
         side=side,
         pos_side=pos_side if hedge_mode else None,

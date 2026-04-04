@@ -34,13 +34,6 @@ def normalize_swap_inst_id(raw: str) -> str:
     return f"{s}-USDT-SWAP"
 
 
-def margin_ccy_from_inst_id(inst_id: str) -> str:
-    parts = inst_id.strip().upper().split("-")
-    if len(parts) >= 2 and parts[1]:
-        return parts[1]
-    return "USDT"
-
-
 # OKX 文档：逐仓 isolated 在跨币种(3)、组合保证金(4)账户下不可用，否则会报 Parameter mgnMode 类错误。
 _ACCT_LV_NO_ISOLATED = frozenset({"3", "4"})
 
@@ -164,35 +157,25 @@ async def post_contract_order(
                 detail={"step": "set_leverage", "okx": lev_data},
             )
 
-    ok_sz, sz_or_err = await _client.swap_sz_from_usdt_principal(
-        inst_id, body.principal_usdt.strip()
+    ok_order, payload = await _client.place_swap_market_by_principal_usdt(
+        inst_id,
+        body.principal_usdt.strip(),
+        td_mode=td_mode,
+        side=side,
+        pos_side=pos_side if hedge_mode else None,
     )
-    if not ok_sz:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=sz_or_err if isinstance(sz_or_err, dict) else {"msg": str(sz_or_err)},
-        )
-    sz_str = str(sz_or_err)
-
-    order_payload: dict[str, Any] = {
-        "instId": inst_id,
-        "tdMode": td_mode,
-        "side": side,
-        "ordType": "market",
-        "sz": sz_str,
-    }
-    if hedge_mode:
-        order_payload["posSide"] = pos_side
-    if "-SWAP" in inst_id.upper() and td_mode == "isolated":
-        order_payload["ccy"] = margin_ccy_from_inst_id(inst_id)
-
-    ok, data = await _client.place_order(order_payload)
-    if not ok:
+    if not ok_order:
+        kind, detail = payload  # type: ignore[misc]
+        if kind == "sz":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=detail if isinstance(detail, dict) else {"msg": str(detail)},
+            )
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
-            detail={"step": "place_order", "okx": data},
+            detail={"step": "place_order", "okx": detail},
         )
-    return data  # type: ignore[return-value]
+    return payload  # type: ignore[return-value]
 
 
 @router.post("/margin-add")

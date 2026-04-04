@@ -257,6 +257,45 @@ class OkxFollowOrderClient:
             }
         return True, self._fmt_okx_sz(sz_adj)
 
+    async def place_swap_market_by_principal_usdt(
+        self,
+        inst_id: str,
+        principal_usdt: str,
+        *,
+        td_mode: str,
+        side: str,
+        pos_side: str | None = None,
+    ) -> tuple[bool, Any]:
+        """
+        U 本位永续市价开仓：数量仅接受 principal_usdt（USDT 名义），内部换算张数后调 place_order。
+        成功: (True, OKX 下单响应体)
+        失败: (False, ("sz", detail)) 换算失败；(False, ("place", detail)) 下单失败
+        """
+        ok_sz, sz_or_err = await self.swap_sz_from_usdt_principal(
+            inst_id, principal_usdt.strip()
+        )
+        if not ok_sz:
+            return False, ("sz", sz_or_err)
+
+        iid = inst_id.strip().upper()
+        params: dict[str, Any] = {
+            "instId": iid,
+            "tdMode": td_mode,
+            "side": side,
+            "ordType": "market",
+            "sz": str(sz_or_err),
+        }
+        if pos_side:
+            params["posSide"] = pos_side
+        if "-SWAP" in iid and td_mode == "isolated":
+            parts = iid.split("-")
+            params["ccy"] = parts[1] if len(parts) >= 2 and parts[1] else "USDT"
+
+        ok_po, data = await self.place_order(params)
+        if not ok_po:
+            return False, ("place", data)
+        return True, data
+
     async def get_trade_fills(
         self,
         *,

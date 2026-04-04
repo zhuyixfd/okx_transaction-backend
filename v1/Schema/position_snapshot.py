@@ -23,6 +23,7 @@ class PositionSnapshotItem(BaseModel):
         None,
         description="接口 uplRatio，写入快照 JSON；与按价计算的收益率可能一致或含杠杆口径",
     )
+    upl: Optional[str] = Field(None, description="未实现盈亏（USDT），接口 upl")
 
 
 class PositionSnapshotOut(BaseModel):

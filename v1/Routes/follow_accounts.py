@@ -51,6 +51,22 @@ def _upl_ratio_from_detail_json(detail_json: str | None) -> str | None:
     return s if s else None
 
 
+def _upl_from_detail_json(detail_json: str | None) -> str | None:
+    if not detail_json or not str(detail_json).strip():
+        return None
+    try:
+        d = json.loads(detail_json)
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    v = d.get("upl")
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+
 def _normalize_link(url: str) -> str:
     return str(url).strip().rstrip("/")
 
@@ -179,6 +195,8 @@ def _snapshot_row_to_item(row: dict) -> PositionSnapshotItem:
     if ur is None:
         ur = row.get("upl_ratio")
     upl_s = None if ur is None else (str(ur).strip() or None)
+    uu = row.get("upl")
+    upl_usdt = None if uu is None else (str(uu).strip() or None)
     return PositionSnapshotItem(
         pos_id=str(row.get("posId", "")),
         c_time=row.get("cTime"),
@@ -189,6 +207,7 @@ def _snapshot_row_to_item(row: dict) -> PositionSnapshotItem:
         avg_px=row.get("avgPx"),
         last_px=row.get("last"),
         upl_ratio=upl_s,
+        upl=upl_usdt,
     )
 
 
@@ -205,6 +224,7 @@ def _event_to_out(r: FollowPositionEvent) -> PositionEventOut:
         avg_px=r.avg_px,
         last_px=r.last_px,
         upl_ratio=_upl_ratio_from_detail_json(r.detail_json),
+        upl=_upl_from_detail_json(r.detail_json),
         c_time=r.c_time,
         detail_json=r.detail_json,
         created_at=r.created_at,

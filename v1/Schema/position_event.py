@@ -23,6 +23,10 @@ class PositionEventOut(BaseModel):
         None,
         description="从 detail_json 解析的 uplRatio（新写入的事件才有；历史行可能为空）",
     )
+    upl: Optional[str] = Field(
+        None,
+        description="从 detail_json 解析的 upl（USDT）；未平仓行可由前端用快照覆盖为实时",
+    )
     c_time: Optional[str] = None
     detail_json: Optional[str] = None
     created_at: datetime

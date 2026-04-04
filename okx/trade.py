@@ -27,6 +27,26 @@ def pick_lever_from_pos(pos: dict) -> str:
     return ""
 
 
+def _fmt_upl_ratio_pct(pos: dict) -> str:
+    v = pos.get("uplRatio")
+    if v is None or (isinstance(v, str) and str(v).strip() == ""):
+        return ""
+    try:
+        return str(round(float(v) * 100, 2))
+    except (TypeError, ValueError):
+        return str(v).strip()
+
+
+def _fmt_upl_usdt(pos: dict) -> str:
+    v = pos.get("upl")
+    if v is None or (isinstance(v, str) and str(v).strip() == ""):
+        return ""
+    try:
+        return f"{float(v):.3f}"
+    except (TypeError, ValueError):
+        return str(v).strip()
+
+
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -84,6 +104,7 @@ class OkxTrade:
         avgPx: 开仓均价
         last: 标记价格
         uplRatio: 收益率
+        upl: 盈亏
         """
         session = cls.get_session()
         async with session.get(
@@ -115,11 +136,8 @@ class OkxTrade:
                 "lever": pick_lever_from_pos(pos),
                 "avgPx": pos.get("avgPx"),
                 "last": pos.get("last"),
-                "uplRatio": (
-                    ""
-                    if pos.get("uplRatio") is None
-                    else str(round(float(pos.get("uplRatio")) * 100, 2)).strip()
-                ),
+                "uplRatio": _fmt_upl_ratio_pct(pos),
+                "upl": _fmt_upl_usdt(pos),
             })
         return res
 

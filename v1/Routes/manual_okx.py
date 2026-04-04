@@ -93,8 +93,11 @@ async def post_contract_order(
     pos_side = "long" if body.direction == "long" else "short"
 
     ok_pm, pm_data = await _client.set_position_mode("long_short_mode")
+    # 59000：有挂单/持仓/机器人时 OKX 拒绝改持仓模式；若已是开平仓模式仍可下单，故不阻断。
     if not ok_pm:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=pm_data)
+        pm_code = str(pm_data.get("code", "")) if isinstance(pm_data, dict) else ""
+        if pm_code != "59000":
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=pm_data)
 
     if body.lever is not None:
         try:

@@ -32,6 +32,7 @@ _ENV_PATH = _BACKEND_ROOT / ".env"
 _PLACE_ORDER_PATH = "/api/v5/trade/order"
 _MARGIN_BALANCE_PATH = "/api/v5/account/position/margin-balance"
 _SET_LEVERAGE_PATH = "/api/v5/account/set-leverage"
+_SET_POSITION_MODE_PATH = "/api/v5/account/set-position-mode"
 
 _DEFAULT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=15)
 
@@ -331,6 +332,11 @@ class OkxFollowOrderClient:
             obj["ccy"] = ccy.strip()
         body = json.dumps(obj, separators=(",", ":"))
         return await self._post(_SET_LEVERAGE_PATH, body)
+
+    async def set_position_mode(self, pos_mode: str) -> tuple[bool, Any]:
+        """POST /api/v5/account/set-position-mode（long_short_mode=开平仓/双向）。"""
+        body = json.dumps({"posMode": pos_mode.strip()}, separators=(",", ":"))
+        return await self._post(_SET_POSITION_MODE_PATH, body)
 
     async def place_order(self, params: dict[str, Any]) -> tuple[bool, Any]:
         """POST /api/v5/trade/order"""

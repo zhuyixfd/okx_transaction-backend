@@ -92,6 +92,10 @@ async def post_contract_order(
     side = "buy" if body.direction == "long" else "sell"
     pos_side = "long" if body.direction == "long" else "short"
 
+    ok_pm, pm_data = await _client.set_position_mode("long_short_mode")
+    if not ok_pm:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=pm_data)
+
     if body.lever is not None:
         try:
             lv = int(body.lever)
@@ -134,7 +138,7 @@ async def post_contract_order(
         "sz": sz_str,
         "posSide": pos_side,
     }
-    if "-SWAP" in inst_id.upper():
+    if "-SWAP" in inst_id.upper() and body.td_mode == "isolated":
         order_payload["ccy"] = margin_ccy_from_inst_id(inst_id)
 
     ok, data = await _client.place_order(order_payload)

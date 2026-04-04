@@ -118,7 +118,7 @@ class OkxTrade:
                 "uplRatio": (
                     ""
                     if pos.get("uplRatio") is None
-                    else str(pos.get("uplRatio")).strip()
+                    else str(round(float(pos.get("uplRatio")) * 100, 2)).strip()
                 ),
             })
         return res

@@ -26,12 +26,18 @@ def _ensure_okx() -> None:
 
 
 def normalize_swap_inst_id(raw: str) -> str:
+    """统一为 U 本位永续 instId（*-USDT-SWAP）。仅「币-USDT」两段时补 -SWAP，完整 instId 保持原样。"""
     s = raw.strip().upper()
     if not s:
         return s
-    if "-" in s:
+    if s.endswith("-SWAP"):
         return s
-    return f"{s}-USDT-SWAP"
+    if "-" not in s:
+        return f"{s}-USDT-SWAP"
+    parts = s.split("-")
+    if len(parts) == 2:
+        return f"{s}-SWAP"
+    return s
 
 
 # OKX 文档：逐仓 isolated 在跨币种(3)、组合保证金(4)账户下不可用，否则会报 Parameter mgnMode 类错误。
@@ -141,7 +147,7 @@ class ContractOrderBody(BaseModel):
 
 class MarginAddBody(BaseModel):
     inst_id: str = Field(..., min_length=1, max_length=64)
-    pos_side: str = Field(..., pattern="^(long|short|net)$")
+    pos_side: str = Field(..., pattern="^(long|short)$")
     amt: str = Field(..., min_length=1, max_length=32)
 
 
@@ -249,9 +255,19 @@ async def post_margin_add(
 ) -> dict:
     _ensure_okx()
     inst_id = normalize_swap_inst_id(body.inst_id)
+    ok_cfg, cfg_data = await _client.get_account_config()
+    _, cfg_pos_mode = (
+        _parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+    )
+    # 买卖模式（单向）下 OKX 要求 posSide=net，与多/空无关
+    api_pos_side = (
+        "net"
+        if cfg_pos_mode == "net_mode"
+        else body.pos_side.lower()
+    )
     ok, data = await _client.add_position_margin(
         inst_id,
-        body.pos_side.lower(),
+        api_pos_side,
         body.amt.strip(),
     )
     if not ok:

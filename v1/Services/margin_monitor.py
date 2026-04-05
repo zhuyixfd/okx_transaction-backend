@@ -5,7 +5,7 @@
     追加 USDT = bet_amount_per_position × margin_add_ratio_of_bet
 
 与 position_monitor 相同：主管协程定期对齐 DB 中的目标列表，多帐户并发、互不争抢同一轮询周期。
-同一 OKX 密钥 + 同一合约 + 同一 posSide 在进程内用 asyncio.Lock 串行追加，且成功追加后冷却时间取 max(COOLDOWN_SEC, 2×轮询间隔)，避免约 1s 一轮或并发跟单任务重复追加。
+同一 OKX 密钥 + 同一合约 + 同一 posSide 在进程内用 asyncio.Lock 串行追加；两次成功追加最短间隔见 COOLDOWN_SEC（与轮询周期独立，由该常量单独控制）。
 条件：跟单启用、绑定 OKX、真实交易、启动追加、下注金额 > 0、密钥完整。可选 margin_add_max_times
 与计数清零规则见下方全局变量说明。
 
@@ -40,7 +40,7 @@ _margin_add_counts: dict[tuple[int, str, str], int] = {}
 """计数键：(follow_accounts.id, instId, posSide)，低于阈值期间累计；mgnRatio（比例）> 阈值后清零。"""
 _margin_key_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 """与冷却键一致：同一 OKX 帐户同一仓位串行化「判冷却 + 调追加接口」，避免多跟单任务并发双发。"""
-COOLDOWN_SEC = 60.0
+COOLDOWN_SEC = 0.5
 """同一 OKX 密钥、同一合约、同一 posSide 两次成功追加之间的最短间隔（秒）。"""
 _ACCOUNT_MARGIN_INTERVAL_SEC = 1.0
 """每个跟单帐户协程的轮询间隔（秒）。"""
@@ -48,11 +48,6 @@ _SUPERVISOR_INTERVAL_SEC = 1.0
 """主管协程对齐「应监控的跟单 id 列表」的间隔（秒）。"""
 # 欧易 GET /account/positions 的 mgnRatio 为比例：2.0 = 200%，与前端 formatMaintMarginRatioPct 的 ×100 一致
 MAINT_MARGIN_RATIO_THRESHOLD = 2.0
-
-
-def _margin_cooldown_effective_sec() -> float:
-    """冷却不得短于轮询周期的 2 倍，否则约 1s 一轮会与「刚追加完仍 ≤ 阈值」叠加导致连续追加。"""
-    return max(COOLDOWN_SEC, _ACCOUNT_MARGIN_INTERVAL_SEC * 2)
 
 
 def _get_margin_lock(key: tuple[int, str, str]) -> asyncio.Lock:
@@ -223,8 +218,7 @@ async def _poll_positions_and_maybe_add_margin(
         lock = _get_margin_lock(cooldown_key)
         async with lock:
             now = time.time()
-            cool = _margin_cooldown_effective_sec()
-            if now - _last_add_ts.get(cooldown_key, 0) < cool:
+            if now - _last_add_ts.get(cooldown_key, 0) < COOLDOWN_SEC:
                 continue
             ok2, res = await add_position_margin(
                 inst_id, api_pos_side, amt_str, client=client
@@ -235,7 +229,7 @@ async def _poll_positions_and_maybe_add_margin(
                 print(
                     f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
                     f"{inst_id} {api_pos_side} amt={amt_str} mgnRatio~={mgn} "
-                    f"count={_margin_add_counts[count_key]} cooldown>={cool}s"
+                    f"count={_margin_add_counts[count_key]} cooldown>={COOLDOWN_SEC}s"
                 )
             else:
                 print(

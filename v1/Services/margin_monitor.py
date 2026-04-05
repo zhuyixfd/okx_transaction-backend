@@ -1,6 +1,6 @@
 """
 每个启用「自动追加」的跟单帐户独立协程：约每 1 秒拉取该帐户绑定 OKX 的永续持仓（mgnRatio），
-当 **mgnRatio ≤ 200%** 时按本帐户配置追加逐仓保证金：
+当 **mgnRatio ≤ 2（即 ≤200%，接口为比例而非百分数字）** 时按本帐户配置追加逐仓保证金：
 
     追加 USDT = bet_amount_per_position × margin_add_ratio_of_bet
 
@@ -36,18 +36,19 @@ from v1.Services.okx_contract_helpers import parse_account_config_fields
 _last_add_ts: dict[tuple[int, str, str], float] = {}
 """冷却键：(okx_api_accounts.id, instId, posSide)。"""
 _margin_add_counts: dict[tuple[int, str, str], int] = {}
-"""计数键：(follow_accounts.id, instId, posSide)，低于阈值期间累计；mgnRatio ≥ 阈值后清零。"""
+"""计数键：(follow_accounts.id, instId, posSide)，低于阈值期间累计；mgnRatio（比例）> 阈值后清零。"""
 COOLDOWN_SEC = 60.0
 """单跟单帐户内两次成功追加之间的最短间隔（秒）。"""
 _ACCOUNT_MARGIN_INTERVAL_SEC = 1.0
 """每个跟单帐户协程的轮询间隔（秒）。"""
 _SUPERVISOR_INTERVAL_SEC = 1.0
 """主管协程对齐「应监控的跟单 id 列表」的间隔（秒）。"""
-MAINT_MARGIN_RATIO_THRESHOLD_PCT = 200.0
+# 欧易 GET /account/positions 的 mgnRatio 为比例：2.0 = 200%，与前端 formatMaintMarginRatioPct 的 ×100 一致
+MAINT_MARGIN_RATIO_THRESHOLD = 2.0
 
 
-def _parse_mgn_ratio_percent(raw: object) -> float | None:
-    """解析持仓 mgnRatio：去 %、千分位；无法解析返回 None。"""
+def _parse_mgn_ratio_api(raw: object) -> float | None:
+    """解析持仓 mgnRatio（比例）：去 %、千分位；无法解析返回 None。"""
     if raw is None:
         return None
     s = str(raw).strip()
@@ -61,8 +62,8 @@ def _parse_mgn_ratio_percent(raw: object) -> float | None:
 
 
 def _effective_mgn_ratio_for_monitor(p: dict[str, Any]) -> float | None:
-    """仅使用接口 mgnRatio（与欧易「维持保证金率」阈值 200 同量级）；空则无法判断。"""
-    return _parse_mgn_ratio_percent(p.get("mgnRatio"))
+    """仅使用接口 mgnRatio（比例，2=200%）；空则无法判断。"""
+    return _parse_mgn_ratio_api(p.get("mgnRatio"))
 
 
 def _rows_live_margin_okx(db: Session) -> list[tuple[FollowAccount, OkxApiAccount]]:
@@ -150,7 +151,7 @@ async def _poll_positions_and_maybe_add_margin(
     max_times: int | None,
     client: OkxFollowOrderClient,
 ) -> None:
-    thr_f = MAINT_MARGIN_RATIO_THRESHOLD_PCT
+    thr_f = MAINT_MARGIN_RATIO_THRESHOLD
     ok, data = await get_positions_inst("SWAP", client=client)
     if not ok:
         print(f"[margin_monitor] get_positions follow_id={acc_id} okx_id={okx_cred_id}: {data!r}")
@@ -190,7 +191,7 @@ async def _poll_positions_and_maybe_add_margin(
                 )
             continue
         count_key = (acc_id, inst_id.lower(), api_pos_side)
-        # 高于阈值视为安全并清零计数；≤ 阈值则尝试追加（含等于 200%）
+        # 比例 > 2 视为高于 200%，安全并清零计数；≤ 2（含等于）则尝试追加
         if mgn > thr_f:
             _margin_add_counts.pop(count_key, None)
             continue

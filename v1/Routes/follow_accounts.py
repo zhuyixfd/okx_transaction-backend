@@ -572,7 +572,7 @@ def delete_follow_sim_record(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
     db: Session = Depends(get_db),
 ) -> FollowSimRecordDeleteOut:
-    """删除一条模拟跟单记录；仅当该跟单帐户未启用真实交易时允许（避免与实盘对账混淆）。"""
+    """删除一条模拟跟单资金记录（follow_sim_records）；与是否启用真实交易无关。"""
     ensure_mysql_db_configured()
     un = unique_name.strip()
     acc = (
@@ -581,11 +581,6 @@ def delete_follow_sim_record(
     )
     if acc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
-    if acc.live_trading_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="已启用真实交易时不能删除模拟记录；请先关闭「启用真实交易」后再删。",
-        )
     rec = db.get(FollowSimRecord, record_id)
     if rec is None or rec.follow_account_id != acc.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")

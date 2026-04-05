@@ -47,6 +47,11 @@ class FollowSimRecordOut(BaseModel):
         return format(v, "f")
 
 
+class FollowSimRecordDeleteOut(BaseModel):
+    ok: bool = True
+    id: int = Field(..., description="已删除的 follow_sim_records.id")
+
+
 class FollowSimRecordsPageOut(BaseModel):
     items: List[FollowSimRecordOut]
     total: int = Field(..., description="满足条件的记录总数（分页）")

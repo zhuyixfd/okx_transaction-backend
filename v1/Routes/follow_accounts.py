@@ -27,7 +27,11 @@ from v1.Schema.follow_account import (
 )
 from v1.Schema.okx_api_account import FollowAccountOkxBindPatch
 from v1.Schema.position_event import PositionEventOut, PositionEventPageOut
-from v1.Schema.follow_sim_record import FollowSimRecordOut, FollowSimRecordsPageOut
+from v1.Schema.follow_sim_record import (
+    FollowSimRecordDeleteOut,
+    FollowSimRecordOut,
+    FollowSimRecordsPageOut,
+)
 from v1.Schema.position_pnl_summary import PnlTotalsBlock, PositionPnlSummaryOut
 from v1.Schema.position_snapshot import PositionSnapshotItem, PositionSnapshotOut
 from v1.Services.position_monitor import _sim_pnl_usdt
@@ -557,6 +561,37 @@ def list_follow_sim_records(
         realized_sum_usdt=format(rd, "f"),
         unrealized_sum_usdt=format(ud, "f"),
     )
+
+
+@router.delete(
+    "/follow-sim-records/{record_id}",
+    response_model=FollowSimRecordDeleteOut,
+)
+def delete_follow_sim_record(
+    record_id: int,
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    db: Session = Depends(get_db),
+) -> FollowSimRecordDeleteOut:
+    """删除一条模拟跟单记录；仅当该跟单帐户未启用真实交易时允许（避免与实盘对账混淆）。"""
+    ensure_mysql_db_configured()
+    un = unique_name.strip()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if acc.live_trading_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="已启用真实交易时不能删除模拟记录；请先关闭「启用真实交易」后再删。",
+        )
+    rec = db.get(FollowSimRecord, record_id)
+    if rec is None or rec.follow_account_id != acc.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
+    db.delete(rec)
+    db.commit()
+    return FollowSimRecordDeleteOut(id=record_id)
 
 
 @router.patch("/{account_id}/okx-bind", response_model=FollowAccountOut)

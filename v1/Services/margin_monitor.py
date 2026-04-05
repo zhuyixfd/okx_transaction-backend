@@ -1,6 +1,6 @@
 """
 每个启用「自动追加」的跟单帐户独立协程：约每 1 秒拉取该帐户绑定 OKX 的永续持仓（mgnRatio），
-当 **mgnRatio < 200%** 时按本帐户配置追加逐仓保证金：
+当 **mgnRatio ≤ 200%** 时按本帐户配置追加逐仓保证金：
 
     追加 USDT = bet_amount_per_position × margin_add_ratio_of_bet
 
@@ -31,6 +31,7 @@ from module.follow_order import (
 )
 from v1.Models.follow_account import FollowAccount
 from v1.Models.okx_api_account import OkxApiAccount
+from v1.Services.okx_contract_helpers import parse_account_config_fields
 
 _last_add_ts: dict[tuple[int, str, str], float] = {}
 """冷却键：(okx_api_accounts.id, instId, posSide)。"""
@@ -43,6 +44,25 @@ _ACCOUNT_MARGIN_INTERVAL_SEC = 1.0
 _SUPERVISOR_INTERVAL_SEC = 1.0
 """主管协程对齐「应监控的跟单 id 列表」的间隔（秒）。"""
 MAINT_MARGIN_RATIO_THRESHOLD_PCT = 200.0
+
+
+def _parse_mgn_ratio_percent(raw: object) -> float | None:
+    """解析持仓 mgnRatio：去 %、千分位；无法解析返回 None。"""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    s = s.replace("%", "").replace(",", "").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _effective_mgn_ratio_for_monitor(p: dict[str, Any]) -> float | None:
+    """仅使用接口 mgnRatio（与欧易「维持保证金率」阈值 200 同量级）；空则无法判断。"""
+    return _parse_mgn_ratio_percent(p.get("mgnRatio"))
 
 
 def _rows_live_margin_okx(db: Session) -> list[tuple[FollowAccount, OkxApiAccount]]:
@@ -135,34 +155,48 @@ async def _poll_positions_and_maybe_add_margin(
     if not ok:
         print(f"[margin_monitor] get_positions follow_id={acc_id} okx_id={okx_cred_id}: {data!r}")
         return
+    ok_cfg, cfg_data = await client.get_account_config()
+    _, cfg_pos_mode = (
+        parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+    )
+    net_account = cfg_pos_mode == "net_mode"
+
     pos_list = data.get("data") or []
     for p in pos_list:
-        inst_id = str(p.get("instId") or "")
+        if not isinstance(p, dict):
+            continue
+        if (p.get("mgnMode") or "").lower() != "isolated":
+            continue
+        inst_id = str(p.get("instId") or "").strip()
         if not inst_id:
             continue
-        pos_side = (p.get("posSide") or "net").lower()
-        if pos_side not in ("long", "short", "net"):
-            pos_side = "net"
+        pos_side_raw = (p.get("posSide") or "net").lower()
+        if pos_side_raw not in ("long", "short", "net"):
+            pos_side_raw = "net"
+        api_pos_side = "net" if net_account else pos_side_raw
         try:
             pos_sz = float(str(p.get("pos") or "").strip() or "0")
         except (TypeError, ValueError):
             pos_sz = 0.0
         if abs(pos_sz) < 1e-12:
             continue
-        mgn_raw = p.get("mgnRatio")
-        if mgn_raw is None or mgn_raw == "":
+        mgn = _effective_mgn_ratio_for_monitor(p)
+        if mgn is None:
+            mr = p.get("mgnRatio")
+            if mr is not None and str(mr).strip() != "":
+                print(
+                    f"[margin_monitor] skip unparseable mgnRatio follow_id={acc_id} "
+                    f"{inst_id!r} raw={mr!r}"
+                )
             continue
-        try:
-            mgn = float(mgn_raw)
-        except (TypeError, ValueError):
-            continue
-        count_key = (acc_id, inst_id.lower(), pos_side)
-        if mgn >= thr_f:
+        count_key = (acc_id, inst_id.lower(), api_pos_side)
+        # 高于阈值视为安全并清零计数；≤ 阈值则尝试追加（含等于 200%）
+        if mgn > thr_f:
             _margin_add_counts.pop(count_key, None)
             continue
         if max_times is not None and _margin_add_counts.get(count_key, 0) >= max_times:
             continue
-        cooldown_key = (okx_cred_id, inst_id, pos_side)
+        cooldown_key = (okx_cred_id, inst_id.upper(), api_pos_side)
         now = time.time()
         if now - _last_add_ts.get(cooldown_key, 0) < COOLDOWN_SEC:
             continue
@@ -172,17 +206,22 @@ async def _poll_positions_and_maybe_add_margin(
             amt_str.replace(".", "", 1).isdigit() and float(amt_str) <= 0
         ):
             continue
-        ok2, res = await add_position_margin(inst_id, pos_side, amt_str, client=client)
+        ok2, res = await add_position_margin(
+            inst_id, api_pos_side, amt_str, client=client
+        )
         if ok2:
             _last_add_ts[cooldown_key] = now
             _margin_add_counts[count_key] = _margin_add_counts.get(count_key, 0) + 1
             print(
                 f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
-                f"{inst_id} {pos_side} amt={amt_str} mgnRatio={mgn} "
+                f"{inst_id} {api_pos_side} amt={amt_str} mgnRatio~={mgn} "
                 f"count={_margin_add_counts[count_key]}"
             )
         else:
-            print(f"[margin_monitor] add margin fail follow_id={acc_id} {inst_id}: {res!r}")
+            print(
+                f"[margin_monitor] add margin fail follow_id={acc_id} {inst_id} "
+                f"posSide={api_pos_side}: {res!r}"
+            )
         await asyncio.sleep(0.35)
 
 

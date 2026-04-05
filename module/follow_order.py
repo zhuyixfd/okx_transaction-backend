@@ -387,12 +387,18 @@ class OkxFollowOrderClient:
 
     async def add_position_margin(self, inst_id: str, pos_side: str, amt: str) -> tuple[bool, Any]:
         """POST /api/v5/account/position/margin-balance，type=add 增加逐仓保证金。"""
+        iid = inst_id.strip().upper()
         body_obj: dict[str, Any] = {
-            "instId": inst_id,
-            "posSide": pos_side,
+            "instId": iid,
+            "posSide": str(pos_side).strip().lower(),
             "type": "add",
-            "amt": amt,
+            "amt": str(amt).strip(),
         }
+        # U 本位永续与下单一致：逐仓需带保证金币种，否则部分帐户追加会失败
+        if "-SWAP" in iid:
+            parts = iid.split("-")
+            if len(parts) >= 2 and parts[1]:
+                body_obj["ccy"] = parts[1]
         body = json.dumps(body_obj, separators=(",", ":"))
         return await self._post(_MARGIN_BALANCE_PATH, body)
 

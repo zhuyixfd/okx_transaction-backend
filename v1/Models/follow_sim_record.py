@@ -1,4 +1,12 @@
-"""模拟跟单资金记录：开仓生成行，平仓结算已实现盈亏；未平仓行随标记价更新浮动盈亏。"""
+"""模拟跟单资金记录：开仓生成行，平仓结算已实现盈亏；未平仓行随标记价更新浮动盈亏。
+
+对方仓位指标（与 community position-current 一致）需手工迁移已有库：
+ALTER TABLE follow_sim_records
+  ADD COLUMN src_pos VARCHAR(64) NULL,
+  ADD COLUMN src_margin VARCHAR(64) NULL,
+  ADD COLUMN src_mgn_ratio VARCHAR(64) NULL,
+  ADD COLUMN src_liq_px VARCHAR(64) NULL;
+"""
 
 from __future__ import annotations
 
@@ -46,6 +54,11 @@ class FollowSimRecord(Base):
         Numeric(24, 8), nullable=False, default=Decimal("0")
     )
     last_mark_px: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    src_pos: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    src_margin: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    src_mgn_ratio: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    src_liq_px: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

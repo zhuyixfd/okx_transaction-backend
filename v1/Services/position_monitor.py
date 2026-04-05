@@ -100,7 +100,39 @@ def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
         "last": str(p.get("last", "")),
         "uplRatio": upl_ratio_s,
         "upl": upl_s,
+        "pos": str(p.get("pos", "")).strip(),
+        "margin": str(p.get("margin", "")).strip(),
+        "mgnRatio": str(p.get("mgnRatio", "")).strip(),
+        "liqPx": str(p.get("liqPx", "")).strip(),
     }
+
+
+def _row_src_metrics(row: dict[str, Any]) -> tuple[str | None, str | None, str | None, str | None]:
+    """社区持仓：持仓量、保证金、维持保证金率、预估强平价（写入模拟行/刷新）。"""
+
+    def g(key: str) -> str | None:
+        v = row.get(key)
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s if s else None
+
+    return g("pos"), g("margin"), g("mgnRatio"), g("liqPx")
+
+
+def _apply_src_metrics_to_rec(
+    rec: FollowSimRecord,
+    row: dict[str, Any],
+) -> None:
+    sp, sm, smr, slx = _row_src_metrics(row)
+    if sp is not None:
+        rec.src_pos = sp
+    if sm is not None:
+        rec.src_margin = sm
+    if smr is not None:
+        rec.src_mgn_ratio = smr
+    if slx is not None:
+        rec.src_liq_px = slx
 
 
 def _to_dec(s: str | None) -> Decimal:
@@ -149,6 +181,7 @@ def _create_sim_open(
     side = row.get("posSide")
     ur = _sim_pnl_usdt(stake, str(entry) if entry else None, str(mark) if mark else None, side)
     now = now_cn()
+    sp, sm, smr, slx = _row_src_metrics(row)
     db.add(
         FollowSimRecord(
             follow_account_id=acc.id,
@@ -162,6 +195,10 @@ def _create_sim_open(
             unrealized_pnl_usdt=ur,
             last_mark_px=str(mark) if mark else None,
             updated_at=now,
+            src_pos=sp,
+            src_margin=sm,
+            src_mgn_ratio=smr,
+            src_liq_px=slx,
         )
     )
 
@@ -201,6 +238,7 @@ def _close_sim_at_exit(
     rec.close_event_id = close_ev.id if close_ev else None
     rec.closed_at = now
     rec.updated_at = now
+    _apply_src_metrics_to_rec(rec, exit_row)
 
 
 def _has_open_sim(db: Session, acc_id: int, pid: str) -> bool:
@@ -277,6 +315,7 @@ def _refresh_sim_unrealized(
             str(mark) if mark else None,
             r.pos_side,
         )
+        _apply_src_metrics_to_rec(r, row)
         r.updated_at = now
 
 

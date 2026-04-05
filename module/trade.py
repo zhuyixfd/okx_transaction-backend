@@ -98,6 +98,10 @@ class OkxTrade:
         获取当前持仓。
 
         cTime / cTime_format
+        pos: 持仓量
+        margin: 保证金
+        mgnRatio: 维持保证金率
+        liqPx: 预估强平价
         posCcy: 币种
         posSide: long 做多，short 做空
         lever: 倍数
@@ -131,6 +135,10 @@ class OkxTrade:
                     int(pos["cTime"]) / 1000,
                     tz=CN_TZ,
                 ).strftime("%Y-%m-%d %H:%M:%S"),
+                "pos": pos.get("pos", ""),
+                "mgnRatio": pos.get("mgnRatio", ""),
+                "margin": pos.get("margin", ""),
+                "liqPx": pos.get("liqPx", ""),
                 "posCcy": pos["posCcy"],
                 "posSide": pos["posSide"],
                 "lever": pick_lever_from_pos(pos),

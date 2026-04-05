@@ -90,6 +90,11 @@ CREATE TABLE `follow_sim_records` (
   `realized_pnl_usdt` DECIMAL(24,8) NULL,
   `unrealized_pnl_usdt` DECIMAL(24,8) NOT NULL DEFAULT 0.00000000,
   `last_mark_px` VARCHAR(64) NULL,
+  -- 与对方 community position-current 同步：持仓量、保证金、维持保证金率、预估强平价
+  `src_pos` VARCHAR(64) NULL,
+  `src_margin` VARCHAR(64) NULL,
+  `src_mgn_ratio` VARCHAR(64) NULL,
+  `src_liq_px` VARCHAR(64) NULL,
   `opened_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `closed_at` TIMESTAMP(6) NULL DEFAULT NULL,
   `updated_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -101,3 +106,14 @@ CREATE TABLE `follow_sim_records` (
   CONSTRAINT `fk_fsr_open_evt` FOREIGN KEY (`open_event_id`) REFERENCES `follow_position_events` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_fsr_close_evt` FOREIGN KEY (`close_event_id`) REFERENCES `follow_position_events` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- 已有库增量升级（勿与上面 DROP+CREATE 混用）：仅 follow_sim_records 需加列。
+-- pos / margin / mgnRatio / liqPx 另存于 follow_position_snapshots.snapshot_json
+-- 与 follow_position_events.detail_json，无需改表结构。
+-- ---------------------------------------------------------------------------
+-- ALTER TABLE `follow_sim_records`
+--   ADD COLUMN `src_pos` VARCHAR(64) NULL AFTER `last_mark_px`,
+--   ADD COLUMN `src_margin` VARCHAR(64) NULL AFTER `src_pos`,
+--   ADD COLUMN `src_mgn_ratio` VARCHAR(64) NULL AFTER `src_margin`,
+--   ADD COLUMN `src_liq_px` VARCHAR(64) NULL AFTER `src_mgn_ratio`;

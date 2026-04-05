@@ -67,6 +67,30 @@ def _upl_from_detail_json(detail_json: str | None) -> str | None:
     return s if s else None
 
 
+def _detail_str_field(detail_json: str | None, key: str) -> str | None:
+    if not detail_json or not str(detail_json).strip():
+        return None
+    try:
+        d = json.loads(detail_json)
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    v = d.get(key)
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+
+def _row_str(row: dict, key: str) -> str | None:
+    v = row.get(key)
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+
 def _normalize_link(url: str) -> str:
     return str(url).strip().rstrip("/")
 
@@ -206,10 +230,15 @@ def _snapshot_row_to_item(row: dict) -> PositionSnapshotItem:
         last_px=row.get("last"),
         upl_ratio=upl_s,
         upl=upl_usdt,
+        pos=_row_str(row, "pos"),
+        margin=_row_str(row, "margin"),
+        mgn_ratio=_row_str(row, "mgnRatio"),
+        liq_px=_row_str(row, "liqPx"),
     )
 
 
 def _event_to_out(r: FollowPositionEvent) -> PositionEventOut:
+    dj = r.detail_json
     return PositionEventOut(
         id=r.id,
         follow_account_id=r.follow_account_id,
@@ -221,10 +250,14 @@ def _event_to_out(r: FollowPositionEvent) -> PositionEventOut:
         lever=r.lever,
         avg_px=r.avg_px,
         last_px=r.last_px,
-        upl_ratio=_upl_ratio_from_detail_json(r.detail_json),
-        upl=_upl_from_detail_json(r.detail_json),
+        upl_ratio=_upl_ratio_from_detail_json(dj),
+        upl=_upl_from_detail_json(dj),
+        pos=_detail_str_field(dj, "pos"),
+        margin=_detail_str_field(dj, "margin"),
+        mgn_ratio=_detail_str_field(dj, "mgnRatio"),
+        liq_px=_detail_str_field(dj, "liqPx"),
         c_time=r.c_time,
-        detail_json=r.detail_json,
+        detail_json=dj,
         created_at=r.created_at,
     )
 
@@ -382,6 +415,10 @@ def _sim_to_out(r: FollowSimRecord) -> FollowSimRecordOut:
         realized_pnl_usdt=r.realized_pnl_usdt,
         unrealized_pnl_usdt=r.unrealized_pnl_usdt,
         last_mark_px=r.last_mark_px,
+        src_pos=r.src_pos,
+        src_margin=r.src_margin,
+        src_mgn_ratio=r.src_mgn_ratio,
+        src_liq_px=r.src_liq_px,
         opened_at=r.opened_at,
         closed_at=r.closed_at,
         updated_at=r.updated_at,

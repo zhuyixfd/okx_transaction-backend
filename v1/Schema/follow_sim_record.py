@@ -24,6 +24,10 @@ class FollowSimRecordOut(BaseModel):
         ..., description="未平仓浮动盈亏；已平仓为 0"
     )
     last_mark_px: Optional[str] = None
+    src_pos: Optional[str] = Field(None, description="对方持仓量（落库同步）")
+    src_margin: Optional[str] = Field(None, description="对方保证金")
+    src_mgn_ratio: Optional[str] = Field(None, description="对方维持保证金率")
+    src_liq_px: Optional[str] = Field(None, description="对方预估强平价")
     opened_at: datetime
     closed_at: Optional[datetime] = None
     updated_at: datetime

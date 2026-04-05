@@ -336,8 +336,14 @@ def _reconcile_sim_follow_set(
     eligible: set[str],
     close_intents: list[LiveFollowCloseIntent],
     open_intents: list[LiveFollowOpenIntent],
+    *,
+    skip_open_pids: frozenset[str] = frozenset(),
 ) -> None:
-    """仓位仍在对方快照中但掉出「可跟 n」时结算模拟；新进 n 且无模拟行时补开模拟。"""
+    """仓位仍在对方快照中但掉出「可跟 n」时结算模拟；新进 n 且无模拟行时补开模拟。
+
+    skip_open_pids：本事务内已在「快照 open 分支」创建模拟并发过实盘开仓 intent 的 posId，
+    此处不得再补开，否则同一轮会对同一仓位跟两次（重复下单）。
+    """
     acc_id = acc.id
     open_rows = (
         db.execute(
@@ -358,6 +364,8 @@ def _reconcile_sim_follow_set(
 
     for pid in eligible:
         if pid not in new_map:
+            continue
+        if pid in skip_open_pids:
             continue
         if not _has_open_sim(db, acc_id, pid):
             sid = _create_sim_open(db, acc, new_map[pid], pid, open_ev=None)
@@ -422,6 +430,8 @@ def _apply_snapshot_and_events(
         except Exception:
             old_map = {}
 
+    open_branch_handled_pids: set[str] = set()
+
     for pid, row in new_map.items():
         if pid not in old_map:
             ev = FollowPositionEvent(
@@ -442,6 +452,7 @@ def _apply_snapshot_and_events(
             if pid in eligible:
                 sid = _create_sim_open(db, acc, row, pid, open_ev=ev)
                 if sid is not None:
+                    open_branch_handled_pids.add(pid)
                     _append_live_follow_open_intent(acc, sid, row, pid, open_intents)
 
     for pid, old_row in old_map.items():
@@ -476,7 +487,15 @@ def _apply_snapshot_and_events(
         snap.updated_at = now_cn()
 
     db.flush()
-    _reconcile_sim_follow_set(db, acc, new_map, eligible, close_intents, open_intents)
+    _reconcile_sim_follow_set(
+        db,
+        acc,
+        new_map,
+        eligible,
+        close_intents,
+        open_intents,
+        skip_open_pids=frozenset(open_branch_handled_pids),
+    )
     _refresh_sim_unrealized(db, acc.id, new_map)
     db.commit()
 

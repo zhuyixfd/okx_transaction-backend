@@ -245,5 +245,11 @@ async def run_live_follow_intents(
     """先平后开，与同轮快照中欧易侧先关后开的节奏一致。"""
     for it in close_intents:
         await execute_live_follow_close(it)
+    # 同一轮内同一交易员 posId 只执行一次开仓（防御重复 intent / 多进程竞态）
+    seen_open: set[tuple[int, str]] = set()
     for it in open_intents:
+        key = (it.follow_account_id, it.pos_id)
+        if key in seen_open:
+            continue
+        seen_open.add(key)
         await execute_live_follow_open(it)

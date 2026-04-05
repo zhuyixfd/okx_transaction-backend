@@ -10,6 +10,7 @@ DROP TABLE IF EXISTS `follow_sim_records`;
 DROP TABLE IF EXISTS `follow_position_events`;
 DROP TABLE IF EXISTS `follow_position_snapshots`;
 DROP TABLE IF EXISTS `follow_accounts`;
+DROP TABLE IF EXISTS `okx_api_accounts`;
 DROP TABLE IF EXISTS `users`;
 
 SET FOREIGN_KEY_CHECKS = 1;
@@ -22,6 +23,17 @@ CREATE TABLE `users` (
   `created_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `ix_users_username` (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE `okx_api_accounts` (
+  `id` INT NOT NULL AUTO_INCREMENT,
+  `api_key` VARCHAR(256) NOT NULL,
+  `api_secret` LONGTEXT NOT NULL,
+  `api_passphrase` VARCHAR(512) NOT NULL,
+  `api_label` VARCHAR(256) NULL,
+  `remark` VARCHAR(512) NULL,
+  `created_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE `follow_accounts` (
@@ -38,10 +50,14 @@ CREATE TABLE `follow_accounts` (
   `margin_add_ratio_of_bet` DECIMAL(12,6) NOT NULL DEFAULT 0.200000,
   `margin_auto_enabled` TINYINT(1) NOT NULL DEFAULT 0,
   `margin_add_max_times` INT NULL DEFAULT NULL COMMENT '保证金自动追加次数上限，NULL=不限制',
+  `okx_api_account_id` INT NULL DEFAULT NULL,
+  `live_trading_enabled` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=真实交易私有接口；0=仅模拟',
   PRIMARY KEY (`id`),
   UNIQUE KEY `ix_follow_accounts_link` (`link`),
+  UNIQUE KEY `uq_follow_accounts_okx_api` (`okx_api_account_id`),
   KEY `ix_follow_accounts_unique_name` (`unique_name`),
-  KEY `ix_follow_accounts_last_enabled_at` (`last_enabled_at`)
+  KEY `ix_follow_accounts_last_enabled_at` (`last_enabled_at`),
+  CONSTRAINT `fk_follow_okx_api` FOREIGN KEY (`okx_api_account_id`) REFERENCES `okx_api_accounts` (`id`) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE `follow_position_snapshots` (
@@ -95,6 +111,8 @@ CREATE TABLE `follow_sim_records` (
   `src_margin` VARCHAR(64) NULL,
   `src_mgn_ratio` VARCHAR(64) NULL,
   `src_liq_px` VARCHAR(64) NULL,
+  `live_open_ok` TINYINT(1) NULL DEFAULT NULL,
+  `live_close_ok` TINYINT(1) NULL DEFAULT NULL,
   `opened_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `closed_at` TIMESTAMP(6) NULL DEFAULT NULL,
   `updated_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -117,3 +135,6 @@ CREATE TABLE `follow_sim_records` (
 --   ADD COLUMN `src_margin` VARCHAR(64) NULL AFTER `src_pos`,
 --   ADD COLUMN `src_mgn_ratio` VARCHAR(64) NULL AFTER `src_margin`,
 --   ADD COLUMN `src_liq_px` VARCHAR(64) NULL AFTER `src_mgn_ratio`;
+-- ALTER TABLE `follow_sim_records`
+--   ADD COLUMN `live_open_ok` TINYINT(1) NULL DEFAULT NULL AFTER `src_liq_px`,
+--   ADD COLUMN `live_close_ok` TINYINT(1) NULL DEFAULT NULL AFTER `live_open_ok`;

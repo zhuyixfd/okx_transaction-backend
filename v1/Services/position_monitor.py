@@ -16,6 +16,12 @@ from module.trade import pick_lever_from_pos
 from v1.Models.follow_account import FollowAccount
 from v1.Models.follow_position import FollowPositionEvent, FollowPositionSnapshot
 from v1.Models.follow_sim_record import FollowSimRecord
+from v1.Services.live_follow_trade import (
+    LiveFollowCloseIntent,
+    LiveFollowOpenIntent,
+    run_live_follow_intents,
+)
+from v1.Services.okx_contract_helpers import normalize_swap_inst_id
 
 
 def _c_time_key(p: dict[str, Any]) -> tuple[int, str]:
@@ -161,6 +167,54 @@ def _sim_pnl_usdt(
     return stake * (px - entry) / entry
 
 
+def _should_emit_live_open(acc: FollowAccount) -> bool:
+    if not acc.live_trading_enabled:
+        return False
+    if acc.okx_api_account_id is None:
+        return False
+    bet = acc.bet_amount_per_position
+    return bet is not None and bet > 0
+
+
+def _append_live_follow_open_intent(
+    acc: FollowAccount,
+    sim_id: int,
+    row: dict[str, Any],
+    pid: str,
+    open_intents: list[LiveFollowOpenIntent],
+) -> None:
+    if not _should_emit_live_open(acc):
+        return
+    ccy = (row.get("posCcy") or "").strip()
+    if not ccy:
+        return
+    ps = (row.get("posSide") or "").strip().lower()
+    if ps not in ("long", "short"):
+        return
+    bet = acc.bet_amount_per_position
+    if bet is None or bet <= 0:
+        return
+    principal_s = format(bet, "f").rstrip("0").rstrip(".")
+    if not principal_s:
+        return
+    lev_s = str(row.get("lever") or "").strip()
+    oid = acc.okx_api_account_id
+    if oid is None:
+        return
+    open_intents.append(
+        LiveFollowOpenIntent(
+            follow_account_id=acc.id,
+            okx_api_account_id=oid,
+            sim_record_id=sim_id,
+            pos_id=pid,
+            inst_id=normalize_swap_inst_id(ccy),
+            pos_side=ps,
+            lever_str=lev_s if lev_s else None,
+            principal_usdt=principal_s,
+        )
+    )
+
+
 def _create_sim_open(
     db: Session,
     acc: FollowAccount,
@@ -168,9 +222,9 @@ def _create_sim_open(
     pid: str,
     *,
     open_ev: FollowPositionEvent | None = None,
-) -> None:
+) -> int | None:
     if _has_open_sim(db, acc.id, pid):
-        return
+        return None
     stake = (
         acc.bet_amount_per_position
         if acc.bet_amount_per_position is not None
@@ -182,25 +236,26 @@ def _create_sim_open(
     ur = _sim_pnl_usdt(stake, str(entry) if entry else None, str(mark) if mark else None, side)
     now = now_cn()
     sp, sm, smr, slx = _row_src_metrics(row)
-    db.add(
-        FollowSimRecord(
-            follow_account_id=acc.id,
-            pos_id=pid,
-            pos_ccy=row.get("posCcy") or None,
-            pos_side=side or None,
-            entry_avg_px=str(entry) if entry else None,
-            stake_usdt=stake,
-            status="open",
-            open_event_id=open_ev.id if open_ev else None,
-            unrealized_pnl_usdt=ur,
-            last_mark_px=str(mark) if mark else None,
-            updated_at=now,
-            src_pos=sp,
-            src_margin=sm,
-            src_mgn_ratio=smr,
-            src_liq_px=slx,
-        )
+    rec = FollowSimRecord(
+        follow_account_id=acc.id,
+        pos_id=pid,
+        pos_ccy=row.get("posCcy") or None,
+        pos_side=side or None,
+        entry_avg_px=str(entry) if entry else None,
+        stake_usdt=stake,
+        status="open",
+        open_event_id=open_ev.id if open_ev else None,
+        unrealized_pnl_usdt=ur,
+        last_mark_px=str(mark) if mark else None,
+        updated_at=now,
+        src_pos=sp,
+        src_margin=sm,
+        src_mgn_ratio=smr,
+        src_liq_px=slx,
     )
+    db.add(rec)
+    db.flush()
+    return rec.id
 
 
 def _close_sim_at_exit(
@@ -209,6 +264,7 @@ def _close_sim_at_exit(
     pid: str,
     exit_row: dict[str, Any],
     close_ev: FollowPositionEvent | None,
+    close_intents: list[LiveFollowCloseIntent],
 ) -> None:
     rec = db.execute(
         select(FollowSimRecord)
@@ -222,6 +278,14 @@ def _close_sim_at_exit(
     ).scalar_one_or_none()
     if rec is None:
         return
+    want_live_close = (
+        rec.live_open_ok is True
+        and acc.live_trading_enabled
+        and acc.okx_api_account_id is not None
+    )
+    ccy_for_close = (rec.pos_ccy or "").strip()
+    inst_close = normalize_swap_inst_id(ccy_for_close) if ccy_for_close else ""
+    oid_close = acc.okx_api_account_id
     exit_px = exit_row.get("last") or exit_row.get("avgPx") or "0"
     realized = _sim_pnl_usdt(
         rec.stake_usdt,
@@ -239,6 +303,17 @@ def _close_sim_at_exit(
     rec.closed_at = now
     rec.updated_at = now
     _apply_src_metrics_to_rec(rec, exit_row)
+
+    if want_live_close and inst_close and oid_close is not None:
+        close_intents.append(
+            LiveFollowCloseIntent(
+                follow_account_id=acc.id,
+                okx_api_account_id=oid_close,
+                sim_record_id=rec.id,
+                inst_id=inst_close,
+                pos_side=rec.pos_side,
+            )
+        )
 
 
 def _has_open_sim(db: Session, acc_id: int, pid: str) -> bool:
@@ -259,6 +334,8 @@ def _reconcile_sim_follow_set(
     acc: FollowAccount,
     new_map: dict[str, dict[str, Any]],
     eligible: set[str],
+    close_intents: list[LiveFollowCloseIntent],
+    open_intents: list[LiveFollowOpenIntent],
 ) -> None:
     """仓位仍在对方快照中但掉出「可跟 n」时结算模拟；新进 n 且无模拟行时补开模拟。"""
     acc_id = acc.id
@@ -277,13 +354,17 @@ def _reconcile_sim_follow_set(
         if pid not in new_map:
             continue
         if pid not in eligible:
-            _close_sim_at_exit(db, acc, pid, new_map[pid], None)
+            _close_sim_at_exit(db, acc, pid, new_map[pid], None, close_intents)
 
     for pid in eligible:
         if pid not in new_map:
             continue
         if not _has_open_sim(db, acc_id, pid):
-            _create_sim_open(db, acc, new_map[pid], pid, open_ev=None)
+            sid = _create_sim_open(db, acc, new_map[pid], pid, open_ev=None)
+            if sid is not None:
+                _append_live_follow_open_intent(
+                    acc, sid, new_map[pid], pid, open_intents
+                )
 
 
 def _refresh_sim_unrealized(
@@ -323,6 +404,9 @@ def _apply_snapshot_and_events(
     db: Session,
     acc: FollowAccount,
     positions: list[dict[str, Any]],
+    *,
+    close_intents: list[LiveFollowCloseIntent],
+    open_intents: list[LiveFollowOpenIntent],
 ) -> None:
     unique_rows = _unique_positions_by_pos_id(positions)
     new_map = {str(p["posId"]): _norm_row(p) for p in unique_rows if p.get("posId") is not None}
@@ -356,7 +440,9 @@ def _apply_snapshot_and_events(
             db.add(ev)
             db.flush()
             if pid in eligible:
-                _create_sim_open(db, acc, row, pid, open_ev=ev)
+                sid = _create_sim_open(db, acc, row, pid, open_ev=ev)
+                if sid is not None:
+                    _append_live_follow_open_intent(acc, sid, row, pid, open_intents)
 
     for pid, old_row in old_map.items():
         if pid not in new_map:
@@ -375,7 +461,7 @@ def _apply_snapshot_and_events(
             )
             db.add(ev)
             db.flush()
-            _close_sim_at_exit(db, acc, pid, old_row, close_ev=ev)
+            _close_sim_at_exit(db, acc, pid, old_row, ev, close_intents)
 
     if snap is None:
         db.add(
@@ -390,7 +476,7 @@ def _apply_snapshot_and_events(
         snap.updated_at = now_cn()
 
     db.flush()
-    _reconcile_sim_follow_set(db, acc, new_map, eligible)
+    _reconcile_sim_follow_set(db, acc, new_map, eligible, close_intents, open_intents)
     _refresh_sim_unrealized(db, acc.id, new_map)
     db.commit()
 
@@ -417,13 +503,24 @@ def _sync_fetch_enabled_accounts() -> list[tuple[int, str]]:
         db.close()
 
 
-def _sync_apply_positions(aid: int, positions: list[dict[str, Any]]) -> None:
+def _sync_apply_positions(
+    aid: int, positions: list[dict[str, Any]]
+) -> tuple[list[LiveFollowCloseIntent], list[LiveFollowOpenIntent]]:
+    close_intents: list[LiveFollowCloseIntent] = []
+    open_intents: list[LiveFollowOpenIntent] = []
     db = SessionLocal()
     try:
         acc = db.get(FollowAccount, aid)
         if not acc or not acc.enabled or not acc.unique_name:
-            return
-        _apply_snapshot_and_events(db, acc, positions)
+            return ([], [])
+        _apply_snapshot_and_events(
+            db, acc, positions, close_intents=close_intents, open_intents=open_intents
+        )
+        return (close_intents, open_intents)
+    except Exception:
+        close_intents.clear()
+        open_intents.clear()
+        raise
     finally:
         db.close()
 
@@ -442,7 +539,8 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
             raw = await OkxTrade.get_position_current(unique_name)
             if not isinstance(raw, list):
                 raw = []
-            await asyncio.to_thread(_sync_apply_positions, account_id, raw)
+            closes, opens = await asyncio.to_thread(_sync_apply_positions, account_id, raw)
+            await run_live_follow_intents(closes, opens)
         except asyncio.CancelledError:
             raise
         except Exception as e:

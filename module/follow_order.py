@@ -1,12 +1,12 @@
 """
-OKX v5 私有接口（跟单账户）：统一使用 .env 中 OKX_FOLLOW_* 凭证。
+OKX v5 私有接口（下单 / 持仓 / 成交 / 保证金账单等）。
 
-- POST /api/v5/trade/order — 下单
-  https://www.okx.com/docs-v5/zh/#order-book-trading-trade-post-place-order
-- GET /api/v5/account/positions — 持仓
-- POST /api/v5/account/position/margin-balance — 逐仓调整保证金（追加/减少）
+- 类 OkxFollowOrderClient：封装签名与 HTTP；密钥通过 OkxFollowRuntimeConfig / okx_client_for_db_secrets 注入。
+- 路由层用数据库凭证时统一经 v1.Services.okx_account_client.require_okx_client。
+- .env 仅可选：OKX_FOLLOW_REST_BASE、OKX_FOLLOW_USE_PAPER（模拟盘请求头）。
 
-控制台 IP 白名单、备注名仅本地备注，不参与签名。
+主要方法：place_order、place_swap_market_by_principal_usdt、get_positions_inst、get_trade_fills、
+get_margin_transfer_bills、add_position_margin、get_account_config、set_leverage 等。
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _BACKEND_ROOT / ".env"
 
 _PLACE_ORDER_PATH = "/api/v5/trade/order"
+_CLOSE_POSITION_PATH = "/api/v5/trade/close-position"
 _MARGIN_BALANCE_PATH = "/api/v5/account/position/margin-balance"
 _SET_LEVERAGE_PATH = "/api/v5/account/set-leverage"
 _SET_POSITION_MODE_PATH = "/api/v5/account/set-position-mode"
@@ -37,8 +38,8 @@ _SET_POSITION_MODE_PATH = "/api/v5/account/set-position-mode"
 _DEFAULT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=15)
 
 
-class FollowOrderConfig(BaseSettings):
-    """跟单账户 OKX API：下单、查持仓、调整保证金均读此配置。"""
+class OkxConnectionSettings(BaseSettings):
+    """仅连接相关：REST 域名、是否走欧易模拟盘头；密钥从数据库注入 OkxFollowRuntimeConfig。"""
 
     model_config = SettingsConfigDict(
         env_file=_ENV_PATH,
@@ -46,24 +47,50 @@ class FollowOrderConfig(BaseSettings):
         extra="ignore",
     )
 
-    OKX_FOLLOW_API_KEY: str = ""
-    OKX_FOLLOW_SECRET_KEY: str = ""
-    OKX_FOLLOW_PASSPHRASE: str = ""
     OKX_FOLLOW_USE_PAPER: bool = False
-
-    OKX_FOLLOW_API_WHITELIST_IP: str = ""
-    OKX_FOLLOW_API_LABEL: str = ""
     OKX_FOLLOW_REST_BASE: str = "https://www.okx.com"
+
+
+okx_connection_settings = OkxConnectionSettings()
+
+
+class OkxFollowRuntimeConfig:
+    """内存中的 OKX 凭证（供 OkxFollowOrderClient 使用）。"""
+
+    def __init__(
+        self,
+        api_key: str,
+        secret_key: str,
+        passphrase: str,
+        *,
+        use_paper: bool = False,
+        rest_base: str = "https://www.okx.com",
+    ) -> None:
+        self.OKX_FOLLOW_API_KEY = api_key
+        self.OKX_FOLLOW_SECRET_KEY = secret_key
+        self.OKX_FOLLOW_PASSPHRASE = passphrase
+        self.OKX_FOLLOW_USE_PAPER = use_paper
+        self.OKX_FOLLOW_REST_BASE = (rest_base or "https://www.okx.com").strip().rstrip("/")
 
     def is_configured(self) -> bool:
         return bool(
-            self.OKX_FOLLOW_API_KEY
-            and self.OKX_FOLLOW_SECRET_KEY
-            and self.OKX_FOLLOW_PASSPHRASE
+            (self.OKX_FOLLOW_API_KEY or "").strip()
+            and (self.OKX_FOLLOW_SECRET_KEY or "").strip()
+            and (self.OKX_FOLLOW_PASSPHRASE or "").strip()
         )
 
 
-follow_order_config = FollowOrderConfig()
+def okx_client_for_db_secrets(api_key: str, api_secret: str, api_passphrase: str) -> OkxFollowOrderClient:
+    """使用数据库中的密钥构造客户端（REST/模拟盘头仍读 .env OkxConnectionSettings）。"""
+    return OkxFollowOrderClient(
+        OkxFollowRuntimeConfig(
+            (api_key or "").strip(),
+            (api_secret or "").strip(),
+            (api_passphrase or "").strip(),
+            use_paper=okx_connection_settings.OKX_FOLLOW_USE_PAPER,
+            rest_base=okx_connection_settings.OKX_FOLLOW_REST_BASE or "https://www.okx.com",
+        )
+    )
 
 
 def _sign(secret: str, ts: str, method: str, request_path: str, body: str) -> str:
@@ -79,12 +106,17 @@ def _json_ok(resp_status: int, data: dict[str, Any]) -> bool:
 
 class OkxFollowOrderClient:
     """
-    跟单账户 OKX 客户端：下单、查持仓、追加逐仓保证金。
-    须配置 OKX_FOLLOW_API_KEY / SECRET / PASSPHRASE。
+    OKX 私有接口客户端；须通过 OkxFollowRuntimeConfig 或 okx_client_for_db_secrets 注入密钥。
     """
 
-    def __init__(self, config: FollowOrderConfig | None = None) -> None:
-        self._cfg = config or follow_order_config
+    def __init__(self, config: OkxFollowRuntimeConfig | None = None) -> None:
+        self._cfg = config or OkxFollowRuntimeConfig(
+            "",
+            "",
+            "",
+            use_paper=okx_connection_settings.OKX_FOLLOW_USE_PAPER,
+            rest_base=okx_connection_settings.OKX_FOLLOW_REST_BASE or "https://www.okx.com",
+        )
 
     def is_configured(self) -> bool:
         return self._cfg.is_configured()
@@ -104,7 +136,7 @@ class OkxFollowOrderClient:
         return h
 
     def _not_configured_response(self) -> tuple[bool, dict[str, str]]:
-        return False, {"msg": "OKX 跟单 API 未配置（需 OKX_FOLLOW_* 环境变量）"}
+        return False, {"msg": "OKX API 未配置（请在系统中添加 okx_api_accounts 并传入 okx_api_account_id）"}
 
     def _rest_base(self) -> str:
         return (self._cfg.OKX_FOLLOW_REST_BASE or "https://www.okx.com").strip().rstrip("/")
@@ -399,15 +431,39 @@ class OkxFollowOrderClient:
         body = self._build_body(params)
         return await self._post(_PLACE_ORDER_PATH, body)
 
+    async def close_swap_position(
+        self,
+        inst_id: str,
+        mgn_mode: str,
+        pos_side: str | None,
+    ) -> tuple[bool, Any]:
+        """
+        POST /api/v5/trade/close-position：市价平掉指定合约方向持仓。
+        net 模式：pos_side 传 None（由 OKX 默认 net）；long/short 模式须传 long 或 short。
+        """
+        iid = inst_id.strip().upper()
+        obj: dict[str, Any] = {"instId": iid, "mgnMode": mgn_mode.strip()}
+        if pos_side:
+            obj["posSide"] = str(pos_side).strip().lower()
+        body = json.dumps(obj, separators=(",", ":"))
+        return await self._post(_CLOSE_POSITION_PATH, body)
 
-_default_client = OkxFollowOrderClient()
+
+async def get_positions_inst(
+    inst_type: str = "SWAP",
+    client: OkxFollowOrderClient | None = None,
+) -> tuple[bool, Any]:
+    """查询持仓；须传入已配置密钥的 client。"""
+    c = client if client is not None else OkxFollowOrderClient()
+    return await c.get_positions_inst(inst_type)
 
 
-async def get_positions_inst(inst_type: str = "SWAP") -> tuple[bool, Any]:
-    """使用默认跟单凭证查询持仓（供 margin_monitor 等调用）。"""
-    return await _default_client.get_positions_inst(inst_type)
-
-
-async def add_position_margin(inst_id: str, pos_side: str, amt: str) -> tuple[bool, Any]:
-    """使用默认跟单凭证追加逐仓保证金。"""
-    return await _default_client.add_position_margin(inst_id, pos_side, amt)
+async def add_position_margin(
+    inst_id: str,
+    pos_side: str,
+    amt: str,
+    client: OkxFollowOrderClient | None = None,
+) -> tuple[bool, Any]:
+    """追加逐仓保证金；须传入已配置密钥的 client。"""
+    c = client if client is not None else OkxFollowOrderClient()
+    return await c.add_position_margin(inst_id, pos_side, amt)

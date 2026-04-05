@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, Integer, Numeric, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from config.db import Base
@@ -39,3 +39,13 @@ class FollowAccount(Base):
     margin_auto_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 本人持仓保证金自动追加：最多允许追加的次数；NULL 表示不限制（由监控实际执行）。
     margin_add_max_times: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # 绑定的 OKX API 帐户（跟单下单/保证金用）；停用跟单不清除此字段。
+    okx_api_account_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("okx_api_accounts.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+    )
+    # True：对绑定 OKX 帐户执行真实下单/追加保证金；False：仅模拟跟单记录，不调用私有交易接口。
+    live_trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

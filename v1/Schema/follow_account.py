@@ -42,6 +42,10 @@ class FollowConfigPatch(BaseModel):
         le=100_000,
         description="保证金自动追加次数上限；不传或 null 表示不限制",
     )
+    live_trading_enabled: Optional[bool] = Field(
+        None,
+        description="True=真实交易（调欧易私有接口）；False=仅模拟，不实际下单/追加",
+    )
 
 
 class FollowAccountOut(BaseModel):
@@ -63,6 +67,13 @@ class FollowAccountOut(BaseModel):
     margin_auto_enabled: bool = False
     margin_add_max_times: Optional[int] = Field(
         None, description="保证金自动追加次数上限；null 表示不限制"
+    )
+    okx_api_account_id: Optional[int] = Field(
+        None, description="绑定的 OKX API 帐户 id（okx_api_accounts.id）"
+    )
+    live_trading_enabled: bool = Field(
+        False,
+        description="是否启用真实交易（否则为模拟，不调欧易私有交易接口）",
     )
 
     @field_serializer("last_enabled_at", "created_at", "positions_refreshed_at")

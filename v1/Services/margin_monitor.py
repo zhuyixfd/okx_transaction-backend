@@ -1,10 +1,14 @@
 """
-轮询本人 OKX 永续持仓保证金率：当 mgnRatio ≤ 内置阈值（200%）时，按「下注金额 × 追加比例」追加逐仓保证金。
+每个启用「自动追加」的跟单帐户独立协程：约每 1 秒拉取该帐户绑定 OKX 的永续持仓（mgnRatio），
+当 **mgnRatio < 200%** 时按本帐户配置追加逐仓保证金：
 
-需配置环境变量 OKX_FOLLOW_API_KEY / OKX_FOLLOW_SECRET_KEY / OKX_FOLLOW_PASSPHRASE；
-至少一条 follow_accounts 记录开启 margin_auto_enabled 且填写 bet_amount_per_position。
+    追加 USDT = bet_amount_per_position × margin_add_ratio_of_bet
 
-多帐户同时启用时：取下注金额、追加比例中的最小值（偏保守）。
+与 position_monitor 相同：主管协程定期对齐 DB 中的目标列表，多帐户并发、互不争抢同一轮询周期。
+条件：跟单启用、绑定 OKX、真实交易、启动追加、下注金额 > 0、密钥完整。可选 margin_add_max_times
+与计数清零规则见下方全局变量说明。
+
+.env 可选 OKX_FOLLOW_REST_BASE、OKX_FOLLOW_USE_PAPER。
 """
 
 from __future__ import annotations
@@ -12,115 +16,245 @@ from __future__ import annotations
 import asyncio
 import time
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from config.constant import config as db_config
 from config.db import SessionLocal
-from module.follow_order import add_position_margin, follow_order_config, get_positions_inst
+from module.follow_order import (
+    OkxFollowOrderClient,
+    add_position_margin,
+    get_positions_inst,
+    okx_client_for_db_secrets,
+)
 from v1.Models.follow_account import FollowAccount
+from v1.Models.okx_api_account import OkxApiAccount
 
-_last_add_ts: dict[tuple[str, str], float] = {}
+_last_add_ts: dict[tuple[int, str, str], float] = {}
+"""冷却键：(okx_api_accounts.id, instId, posSide)。"""
+_margin_add_counts: dict[tuple[int, str, str], int] = {}
+"""计数键：(follow_accounts.id, instId, posSide)，低于阈值期间累计；mgnRatio ≥ 阈值后清零。"""
 COOLDOWN_SEC = 60.0
-# 原可配置项已移除，触发条件固定为该阈值（与历史库默认一致）
-DEFAULT_MARGIN_RATIO_THRESHOLD_PCT = Decimal("200")
+"""单跟单帐户内两次成功追加之间的最短间隔（秒）。"""
+_ACCOUNT_MARGIN_INTERVAL_SEC = 1.0
+"""每个跟单帐户协程的轮询间隔（秒）。"""
+_SUPERVISOR_INTERVAL_SEC = 1.0
+"""主管协程对齐「应监控的跟单 id 列表」的间隔（秒）。"""
+MAINT_MARGIN_RATIO_THRESHOLD_PCT = 200.0
 
 
-def _aggregate_config(db: Session) -> dict[str, Decimal] | None:
-    rows = (
+def _rows_live_margin_okx(db: Session) -> list[tuple[FollowAccount, OkxApiAccount]]:
+    accs = (
         db.execute(
             select(FollowAccount).where(
                 FollowAccount.margin_auto_enabled == True,  # noqa: E712
                 FollowAccount.enabled == True,  # noqa: E712
+                FollowAccount.live_trading_enabled == True,  # noqa: E712
+                FollowAccount.okx_api_account_id.isnot(None),
             )
         )
         .scalars()
         .all()
     )
-    if not rows:
-        return None
-    bets = [
-        r.bet_amount_per_position
-        for r in rows
-        if r.bet_amount_per_position is not None and r.bet_amount_per_position > 0
-    ]
-    ars = [r.margin_add_ratio_of_bet for r in rows if r.margin_add_ratio_of_bet is not None]
-    if not bets:
-        return None
-    return {
-        "bet_min": min(bets),
-        "thr": DEFAULT_MARGIN_RATIO_THRESHOLD_PCT,
-        "add_ratio": min(ars) if ars else Decimal("0.2"),
-    }
+    out: list[tuple[FollowAccount, OkxApiAccount]] = []
+    for a in accs:
+        if a.bet_amount_per_position is None or a.bet_amount_per_position <= 0:
+            continue
+        cid = a.okx_api_account_id
+        if cid is None:
+            continue
+        cred = db.get(OkxApiAccount, cid)
+        if cred is None:
+            continue
+        client = okx_client_for_db_secrets(cred.api_key, cred.api_secret, cred.api_passphrase)
+        if not client.is_configured():
+            continue
+        out.append((a, cred))
+    return out
 
 
-async def margin_monitor_loop() -> None:
+def _sync_fetch_margin_follow_ids() -> list[int]:
+    """应运行保证金监控的 follow_accounts.id 列表（与 _rows_live_margin_okx 条件一致）。"""
+    db = SessionLocal()
+    try:
+        return [a.id for a, _ in _rows_live_margin_okx(db)]
+    finally:
+        db.close()
+
+
+def _sync_load_margin_poll_context(follow_account_id: int) -> dict[str, Any] | None:
+    """
+    在线程中读取 DB；若当前不应监控则返回 None。
+    返回字段供异步轮询使用（含密钥，勿日志打印）。
+    """
+    db = SessionLocal()
+    try:
+        acc = db.get(FollowAccount, follow_account_id)
+        if acc is None:
+            return None
+        if not acc.enabled or not acc.margin_auto_enabled or not acc.live_trading_enabled:
+            return None
+        if acc.okx_api_account_id is None:
+            return None
+        if acc.bet_amount_per_position is None or acc.bet_amount_per_position <= 0:
+            return None
+        cred = db.get(OkxApiAccount, acc.okx_api_account_id)
+        if cred is None:
+            return None
+        return {
+            "acc_id": acc.id,
+            "okx_cred_id": cred.id,
+            "bet": acc.bet_amount_per_position,
+            "add_ratio": (
+                acc.margin_add_ratio_of_bet
+                if acc.margin_add_ratio_of_bet is not None
+                else Decimal("0.2")
+            ),
+            "max_times": acc.margin_add_max_times,
+            "api_key": cred.api_key,
+            "api_secret": cred.api_secret,
+            "api_passphrase": cred.api_passphrase,
+        }
+    finally:
+        db.close()
+
+
+async def _poll_positions_and_maybe_add_margin(
+    *,
+    acc_id: int,
+    okx_cred_id: int,
+    bet: Decimal,
+    add_ratio: Decimal,
+    max_times: int | None,
+    client: OkxFollowOrderClient,
+) -> None:
+    thr_f = MAINT_MARGIN_RATIO_THRESHOLD_PCT
+    ok, data = await get_positions_inst("SWAP", client=client)
+    if not ok:
+        print(f"[margin_monitor] get_positions follow_id={acc_id} okx_id={okx_cred_id}: {data!r}")
+        return
+    pos_list = data.get("data") or []
+    for p in pos_list:
+        inst_id = str(p.get("instId") or "")
+        if not inst_id:
+            continue
+        pos_side = (p.get("posSide") or "net").lower()
+        if pos_side not in ("long", "short", "net"):
+            pos_side = "net"
+        try:
+            pos_sz = float(str(p.get("pos") or "").strip() or "0")
+        except (TypeError, ValueError):
+            pos_sz = 0.0
+        if abs(pos_sz) < 1e-12:
+            continue
+        mgn_raw = p.get("mgnRatio")
+        if mgn_raw is None or mgn_raw == "":
+            continue
+        try:
+            mgn = float(mgn_raw)
+        except (TypeError, ValueError):
+            continue
+        count_key = (acc_id, inst_id.lower(), pos_side)
+        if mgn >= thr_f:
+            _margin_add_counts.pop(count_key, None)
+            continue
+        if max_times is not None and _margin_add_counts.get(count_key, 0) >= max_times:
+            continue
+        cooldown_key = (okx_cred_id, inst_id, pos_side)
+        now = time.time()
+        if now - _last_add_ts.get(cooldown_key, 0) < COOLDOWN_SEC:
+            continue
+        add_amt: Decimal = bet * add_ratio  # type: ignore[operator]
+        amt_str = f"{float(add_amt):.8f}".rstrip("0").rstrip(".")
+        if not amt_str or (
+            amt_str.replace(".", "", 1).isdigit() and float(amt_str) <= 0
+        ):
+            continue
+        ok2, res = await add_position_margin(inst_id, pos_side, amt_str, client=client)
+        if ok2:
+            _last_add_ts[cooldown_key] = now
+            _margin_add_counts[count_key] = _margin_add_counts.get(count_key, 0) + 1
+            print(
+                f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
+                f"{inst_id} {pos_side} amt={amt_str} mgnRatio={mgn} "
+                f"count={_margin_add_counts[count_key]}"
+            )
+        else:
+            print(f"[margin_monitor] add margin fail follow_id={acc_id} {inst_id}: {res!r}")
+        await asyncio.sleep(0.35)
+
+
+async def _account_margin_loop(follow_account_id: int) -> None:
+    """单条跟单记录：约每秒读 DB 配置并拉取本人 OKX 持仓，与其它跟单帐户并发。"""
     while True:
         try:
-            if not db_config.MYSQL_DB or not follow_order_config.is_configured():
-                await asyncio.sleep(30)
+            ctx = await asyncio.to_thread(_sync_load_margin_poll_context, follow_account_id)
+            if ctx is None:
+                await asyncio.sleep(_ACCOUNT_MARGIN_INTERVAL_SEC)
                 continue
-
-            db = SessionLocal()
-            try:
-                agg = _aggregate_config(db)
-            finally:
-                db.close()
-
-            if agg is None:
-                await asyncio.sleep(25)
+            client = okx_client_for_db_secrets(
+                str(ctx["api_key"]),
+                str(ctx["api_secret"]),
+                str(ctx["api_passphrase"]),
+            )
+            if not client.is_configured():
+                await asyncio.sleep(_ACCOUNT_MARGIN_INTERVAL_SEC)
                 continue
-
-            ok, data = await get_positions_inst("SWAP")
-            if not ok:
-                print(f"[margin_monitor] get_positions: {data!r}")
-                await asyncio.sleep(15)
-                continue
-
-            pos_list = data.get("data") or []
-            thr_f = float(agg["thr"])
-            bet_min = agg["bet_min"]
-            add_ratio = agg["add_ratio"]
-
-            for p in pos_list:
-                inst_id = str(p.get("instId") or "")
-                if not inst_id:
-                    continue
-                pos_side = (p.get("posSide") or "net").lower()
-                if pos_side not in ("long", "short", "net"):
-                    pos_side = "net"
-                mgn_raw = p.get("mgnRatio")
-                if mgn_raw is None or mgn_raw == "":
-                    continue
-                try:
-                    mgn = float(mgn_raw)
-                except (TypeError, ValueError):
-                    continue
-                if mgn > thr_f:
-                    continue
-
-                key = (inst_id, pos_side)
-                now = time.time()
-                if now - _last_add_ts.get(key, 0) < COOLDOWN_SEC:
-                    continue
-
-                add_amt: Decimal = bet_min * add_ratio
-                amt_str = f"{float(add_amt):.8f}".rstrip("0").rstrip(".")
-                if not amt_str or (amt_str.replace(".", "", 1).isdigit() and float(amt_str) <= 0):
-                    continue
-
-                ok2, res = await add_position_margin(inst_id, pos_side, amt_str)
-                if ok2:
-                    _last_add_ts[key] = now
-                    print(f"[margin_monitor] add margin ok {inst_id} {pos_side} amt={amt_str}")
-                else:
-                    print(f"[margin_monitor] add margin fail {inst_id}: {res!r}")
-                await asyncio.sleep(0.35)
-
-            await asyncio.sleep(12)
+            await _poll_positions_and_maybe_add_margin(
+                acc_id=int(ctx["acc_id"]),
+                okx_cred_id=int(ctx["okx_cred_id"]),
+                bet=ctx["bet"],
+                add_ratio=ctx["add_ratio"],
+                max_times=ctx["max_times"],
+                client=client,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[margin_monitor] loop: {e!r}")
-            await asyncio.sleep(20)
+            print(f"[margin_monitor] follow_id={follow_account_id}: {e!r}")
+        await asyncio.sleep(_ACCOUNT_MARGIN_INTERVAL_SEC)
+
+
+async def margin_monitor_loop() -> None:
+    """
+    对每个满足条件的跟单帐户单独 `asyncio.create_task`，各任务约 1s 一轮询；
+    主管协程约每 1s 对齐 DB 列表（启用/关闭追加、解绑 OKX 等会增删任务）。
+    """
+    tasks: dict[int, asyncio.Task] = {}
+    while True:
+        try:
+            if not db_config.MYSQL_DB:
+                for t in tasks.values():
+                    t.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks.values(), return_exceptions=True)
+                tasks.clear()
+                await asyncio.sleep(5)
+                continue
+
+            want_ids = set(await asyncio.to_thread(_sync_fetch_margin_follow_ids))
+
+            for aid, t in list(tasks.items()):
+                if aid not in want_ids:
+                    t.cancel()
+
+            for aid, t in list(tasks.items()):
+                if aid not in want_ids:
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
+                    tasks.pop(aid, None)
+
+            for aid in want_ids:
+                if aid not in tasks:
+                    tasks[aid] = asyncio.create_task(_account_margin_loop(aid))
+
+            await asyncio.sleep(_SUPERVISOR_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[margin_monitor] supervisor: {e!r}")
+            await asyncio.sleep(2)

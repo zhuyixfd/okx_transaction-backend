@@ -13,7 +13,9 @@ from config.cn_time import now_cn
 from config.db import get_db
 from config.constant import config as db_config
 from module import OkxTrade
+from module.follow_order import OkxFollowOrderClient
 from v1.Models.follow_account import FollowAccount
+from v1.Models.okx_api_account import OkxApiAccount
 from v1.Models.follow_position import FollowPositionEvent, FollowPositionSnapshot
 from v1.Models.follow_sim_record import FollowSimRecord
 from v1.Schema.follow_account import (
@@ -23,11 +25,13 @@ from v1.Schema.follow_account import (
     FollowAccountPatch,
     FollowConfigPatch,
 )
+from v1.Schema.okx_api_account import FollowAccountOkxBindPatch
 from v1.Schema.position_event import PositionEventOut, PositionEventPageOut
 from v1.Schema.follow_sim_record import FollowSimRecordOut, FollowSimRecordsPageOut
 from v1.Schema.position_pnl_summary import PnlTotalsBlock, PositionPnlSummaryOut
 from v1.Schema.position_snapshot import PositionSnapshotItem, PositionSnapshotOut
 from v1.Services.position_monitor import _sim_pnl_usdt
+from v1.Services.okx_account_client import require_okx_client
 
 
 router = APIRouter(prefix="/follow-accounts", tags=["follow-accounts"])
@@ -117,12 +121,33 @@ def _to_out(
         else Decimal("0.2"),
         margin_auto_enabled=bool(row.margin_auto_enabled),
         margin_add_max_times=row.margin_add_max_times,
+        okx_api_account_id=row.okx_api_account_id,
+        live_trading_enabled=bool(row.live_trading_enabled),
     )
 
 
 def _snapshot_refreshed_at(db: Session, account_id: int) -> datetime | None:
     snap = db.get(FollowPositionSnapshot, account_id)
     return snap.updated_at if snap else None
+
+
+def _require_linked_okx_client(db: Session, unique_name: str) -> OkxFollowOrderClient:
+    """当前交易员跟单已绑定的 OKX API 帐户 → OkxFollowOrderClient（密钥来自 DB，请求走 follow_order）。"""
+    ensure_mysql_db_configured()
+    un = unique_name.strip()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    oid = acc.okx_api_account_id
+    if oid is None:
+        raise HTTPException(
+            status_code=status.HTTP_424_FAILED_DEPENDENCY,
+            detail="未绑定 OKX API 帐户，无法查询本人交易数据",
+        )
+    return require_okx_client(db, oid)
 
 
 def ensure_mysql_db_configured() -> None:
@@ -330,6 +355,58 @@ def get_position_snapshot(
     )
 
 
+@router.get("/linked-okx/fills")
+async def linked_okx_trade_fills(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    inst_type: str = Query("SWAP"),
+    inst_id: str | None = Query(None, description="可选，仅某一交易对"),
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    本人合约成交（欧易 GET /api/v5/trade/fills）。
+    使用本页绑定的 okx_api_accounts；实现为 OkxFollowOrderClient.get_trade_fills。
+    """
+    client = _require_linked_okx_client(db, unique_name)
+    ok, data = await client.get_trade_fills(
+        inst_type=inst_type,
+        inst_id=inst_id.strip() if inst_id else None,
+        limit=limit,
+    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
+    return data  # type: ignore[return-value]
+
+
+@router.get("/linked-okx/margin-bills")
+async def linked_okx_margin_bills(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    inst_type: str = Query("SWAP"),
+    limit: int = Query(100, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    """本人保证金划转类账单（欧易 bills-archive type=6）；OkxFollowOrderClient.get_margin_transfer_bills。"""
+    client = _require_linked_okx_client(db, unique_name)
+    ok, data = await client.get_margin_transfer_bills(inst_type=inst_type, limit=limit)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
+    return data  # type: ignore[return-value]
+
+
+@router.get("/linked-okx/positions")
+async def linked_okx_positions(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    inst_type: str = Query("SWAP"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """本人持仓（欧易 GET /api/v5/account/positions）；OkxFollowOrderClient.get_positions_inst。"""
+    client = _require_linked_okx_client(db, unique_name)
+    ok, data = await client.get_positions_inst(inst_type)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
+    return data  # type: ignore[return-value]
+
+
 @router.get("/position-pnl-summary", response_model=PositionPnlSummaryOut)
 def get_position_pnl_summary(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
@@ -482,6 +559,52 @@ def list_follow_sim_records(
     )
 
 
+@router.patch("/{account_id}/okx-bind", response_model=FollowAccountOut)
+def patch_follow_okx_bind(
+    account_id: int,
+    payload: FollowAccountOkxBindPatch,
+    db: Session = Depends(get_db),
+) -> FollowAccountOut:
+    """绑定/更换 OKX API 帐户；已启用跟单时不允许置为未绑定。"""
+    ensure_mysql_db_configured()
+    row = (
+        db.execute(select(FollowAccount).where(FollowAccount.id == account_id))
+        .scalar_one_or_none()
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    new_id = payload.okx_api_account_id
+    if new_id is not None:
+        cred = db.get(OkxApiAccount, new_id)
+        if cred is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="OKX API 帐户不存在")
+        other = (
+            db.execute(
+                select(FollowAccount).where(
+                    FollowAccount.okx_api_account_id == new_id,
+                    FollowAccount.id != account_id,
+                )
+            )
+            .scalar_one_or_none()
+        )
+        if other is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该 API 帐户已绑定其他交易员，一个 API 帐户仅能绑定一个交易员",
+            )
+    if new_id is None and row.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="跟单已启用时不能解除 API 绑定，请先停用跟单",
+        )
+
+    row.okx_api_account_id = new_id
+    db.commit()
+    db.refresh(row)
+    return _to_out(row, positions_refreshed_at=_snapshot_refreshed_at(db, row.id))
+
+
 @router.patch("/{account_id}/follow-config", response_model=FollowAccountOut)
 def patch_follow_config(
     account_id: int,
@@ -502,6 +625,16 @@ def patch_follow_config(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="当前仅支持 bet_mode=cost（按成本下单）",
+        )
+    merged_live = (
+        bool(data["live_trading_enabled"])
+        if "live_trading_enabled" in data and data["live_trading_enabled"] is not None
+        else bool(row.live_trading_enabled)
+    )
+    if merged_live and row.okx_api_account_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="启用真实交易前请先绑定跟单帐户（OKX API）",
         )
     for key, val in data.items():
         setattr(row, key, val)
@@ -535,6 +668,12 @@ def patch_follow_account(
     )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    if payload.enabled and row.okx_api_account_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="启用跟单前请先在详情页绑定 OKX API 帐户",
+        )
 
     if payload.enabled and not row.enabled:
         row.last_enabled_at = now_cn()

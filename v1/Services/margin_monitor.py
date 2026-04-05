@@ -5,6 +5,7 @@
     追加 USDT = bet_amount_per_position × margin_add_ratio_of_bet
 
 与 position_monitor 相同：主管协程定期对齐 DB 中的目标列表，多帐户并发、互不争抢同一轮询周期。
+同一 OKX 密钥 + 同一合约 + 同一 posSide 在进程内用 asyncio.Lock 串行追加，且成功追加后冷却时间取 max(COOLDOWN_SEC, 2×轮询间隔)，避免约 1s 一轮或并发跟单任务重复追加。
 条件：跟单启用、绑定 OKX、真实交易、启动追加、下注金额 > 0、密钥完整。可选 margin_add_max_times
 与计数清零规则见下方全局变量说明。
 
@@ -37,14 +38,29 @@ _last_add_ts: dict[tuple[int, str, str], float] = {}
 """冷却键：(okx_api_accounts.id, instId, posSide)。"""
 _margin_add_counts: dict[tuple[int, str, str], int] = {}
 """计数键：(follow_accounts.id, instId, posSide)，低于阈值期间累计；mgnRatio（比例）> 阈值后清零。"""
+_margin_key_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
+"""与冷却键一致：同一 OKX 帐户同一仓位串行化「判冷却 + 调追加接口」，避免多跟单任务并发双发。"""
 COOLDOWN_SEC = 60.0
-"""单跟单帐户内两次成功追加之间的最短间隔（秒）。"""
+"""同一 OKX 密钥、同一合约、同一 posSide 两次成功追加之间的最短间隔（秒）。"""
 _ACCOUNT_MARGIN_INTERVAL_SEC = 1.0
 """每个跟单帐户协程的轮询间隔（秒）。"""
 _SUPERVISOR_INTERVAL_SEC = 1.0
 """主管协程对齐「应监控的跟单 id 列表」的间隔（秒）。"""
 # 欧易 GET /account/positions 的 mgnRatio 为比例：2.0 = 200%，与前端 formatMaintMarginRatioPct 的 ×100 一致
 MAINT_MARGIN_RATIO_THRESHOLD = 2.0
+
+
+def _margin_cooldown_effective_sec() -> float:
+    """冷却不得短于轮询周期的 2 倍，否则约 1s 一轮会与「刚追加完仍 ≤ 阈值」叠加导致连续追加。"""
+    return max(COOLDOWN_SEC, _ACCOUNT_MARGIN_INTERVAL_SEC * 2)
+
+
+def _get_margin_lock(key: tuple[int, str, str]) -> asyncio.Lock:
+    lock = _margin_key_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _margin_key_locks[key] = lock
+    return lock
 
 
 def _parse_mgn_ratio_api(raw: object) -> float | None:
@@ -198,31 +214,34 @@ async def _poll_positions_and_maybe_add_margin(
         if max_times is not None and _margin_add_counts.get(count_key, 0) >= max_times:
             continue
         cooldown_key = (okx_cred_id, inst_id.upper(), api_pos_side)
-        now = time.time()
-        if now - _last_add_ts.get(cooldown_key, 0) < COOLDOWN_SEC:
-            continue
         add_amt: Decimal = bet * add_ratio  # type: ignore[operator]
         amt_str = f"{float(add_amt):.8f}".rstrip("0").rstrip(".")
         if not amt_str or (
             amt_str.replace(".", "", 1).isdigit() and float(amt_str) <= 0
         ):
             continue
-        ok2, res = await add_position_margin(
-            inst_id, api_pos_side, amt_str, client=client
-        )
-        if ok2:
-            _last_add_ts[cooldown_key] = now
-            _margin_add_counts[count_key] = _margin_add_counts.get(count_key, 0) + 1
-            print(
-                f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
-                f"{inst_id} {api_pos_side} amt={amt_str} mgnRatio~={mgn} "
-                f"count={_margin_add_counts[count_key]}"
+        lock = _get_margin_lock(cooldown_key)
+        async with lock:
+            now = time.time()
+            cool = _margin_cooldown_effective_sec()
+            if now - _last_add_ts.get(cooldown_key, 0) < cool:
+                continue
+            ok2, res = await add_position_margin(
+                inst_id, api_pos_side, amt_str, client=client
             )
-        else:
-            print(
-                f"[margin_monitor] add margin fail follow_id={acc_id} {inst_id} "
-                f"posSide={api_pos_side}: {res!r}"
-            )
+            if ok2:
+                _last_add_ts[cooldown_key] = time.time()
+                _margin_add_counts[count_key] = _margin_add_counts.get(count_key, 0) + 1
+                print(
+                    f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
+                    f"{inst_id} {api_pos_side} amt={amt_str} mgnRatio~={mgn} "
+                    f"count={_margin_add_counts[count_key]} cooldown>={cool}s"
+                )
+            else:
+                print(
+                    f"[margin_monitor] add margin fail follow_id={acc_id} {inst_id} "
+                    f"posSide={api_pos_side}: {res!r}"
+                )
         await asyncio.sleep(0.35)
 
 

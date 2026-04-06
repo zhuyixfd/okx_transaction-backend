@@ -640,7 +640,7 @@ async def post_position_action(
     rec = db.get(FollowSimRecord, body.sim_record_id)
     if rec is None or rec.follow_account_id != acc.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
-    if rec.status != "open":
+    if rec.status != "open" and body.action != "add":
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该仓位已平仓")
     rec_pos_side = (rec.pos_side or "").strip().lower()
     if rec_pos_side not in ("long", "short"):
@@ -862,12 +862,45 @@ async def post_position_action(
         rec.close_event_id = ev.id
         rec.closed_at = now_cn()
 
+    action_rec = rec
     if body.action == "add":
         ok_act, payload = await _place_open_with_side(pos_side)
         if not ok_act:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
-        rec.add_position_count = int(rec.add_position_count or 0) + 1
-        rec.total_invested_usdt = Decimal(str(rec.total_invested_usdt or 0)) + Decimal(principal_s)
+        if rec.status == "open":
+            rec.add_position_count = int(rec.add_position_count or 0) + 1
+            rec.total_invested_usdt = Decimal(str(rec.total_invested_usdt or 0)) + Decimal(principal_s)
+        else:
+            now = now_cn()
+            action_rec = FollowSimRecord(
+                follow_account_id=acc.id,
+                pos_id=rec.pos_id,
+                pos_ccy=rec.pos_ccy,
+                pos_side=rec.pos_side,
+                entry_avg_px=rec.entry_avg_px,
+                stake_usdt=Decimal(principal_s),
+                status="open",
+                open_event_id=None,
+                close_event_id=None,
+                exit_px=None,
+                realized_pnl_usdt=None,
+                unrealized_pnl_usdt=Decimal(0),
+                last_mark_px=None,
+                src_pos=None,
+                src_margin=None,
+                src_mgn_ratio=None,
+                src_liq_px=None,
+                add_position_count=0,
+                reduce_position_count=0,
+                add_margin_count=0,
+                total_invested_usdt=Decimal(principal_s),
+                live_open_ok=None,
+                live_close_ok=None,
+                opened_at=now,
+                closed_at=None,
+                updated_at=now,
+            )
+            db.add(action_rec)
     elif body.action == "reduce":
         ok_act, payload = await _place_reduce_for_side(pos_side)
         if not ok_act:
@@ -907,16 +940,16 @@ async def post_position_action(
         if not ok_open:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "reverse_open", "okx": payload_open})
 
-    rec.updated_at = now_cn()
+    action_rec.updated_at = now_cn()
     db.commit()
-    db.refresh(rec)
+    db.refresh(action_rec)
     return {
         "ok": True,
         "action": body.action,
-        "sim_record_id": rec.id,
-        "add_position_count": int(rec.add_position_count or 0),
-        "reduce_position_count": int(rec.reduce_position_count or 0),
-        "add_margin_count": int(rec.add_margin_count or 0),
+        "sim_record_id": action_rec.id,
+        "add_position_count": int(action_rec.add_position_count or 0),
+        "reduce_position_count": int(action_rec.reduce_position_count or 0),
+        "add_margin_count": int(action_rec.add_margin_count or 0),
     }
 
 

@@ -738,20 +738,26 @@ async def post_position_action(
             f"[position_action] no target follow_id={acc.id} sim_id={rec.id} "
             f"base={base_ccy} prefer_side={rec_pos_side} rows={same_base_rows!r}"
         )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "msg": "未找到当前持仓（请确认该币种仍有仓位并刷新页面）",
-                "base_ccy": base_ccy,
-                "prefer_pos_side": rec_pos_side,
-                "rows_same_base": same_base_rows,
-            },
-        )
-    row_pos_side = str(target_row.get("posSide", "")).strip().lower()
-    pos_side = row_pos_side if row_pos_side in ("long", "short") else rec_pos_side
-    api_pos_side = pos_side if hedge_mode else None
-    row_mgn_mode = str(target_row.get("mgnMode", "")).strip().lower()
-    td_mode = "cross" if row_mgn_mode == "cross" else "isolated"
+        if body.action != "add":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "msg": "未找到当前持仓（请确认该币种仍有仓位并刷新页面）",
+                    "base_ccy": base_ccy,
+                    "prefer_pos_side": rec_pos_side,
+                    "rows_same_base": same_base_rows,
+                },
+            )
+        # 无当前仓位时，「加仓」等价为按记录方向开仓
+        pos_side = rec_pos_side
+        api_pos_side = pos_side if hedge_mode else None
+        td_mode = "isolated"
+    else:
+        row_pos_side = str(target_row.get("posSide", "")).strip().lower()
+        pos_side = row_pos_side if row_pos_side in ("long", "short") else rec_pos_side
+        api_pos_side = pos_side if hedge_mode else None
+        row_mgn_mode = str(target_row.get("mgnMode", "")).strip().lower()
+        td_mode = "cross" if row_mgn_mode == "cross" else "isolated"
 
     lever_i: int | None = None
     if target_row is not None:

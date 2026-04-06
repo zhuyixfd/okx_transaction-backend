@@ -330,6 +330,42 @@ def _has_open_sim(db: Session, acc_id: int, pid: str) -> bool:
     return r is not None
 
 
+def _same_source_position_recently_closed(
+    db: Session,
+    acc_id: int,
+    pid: str,
+    row: dict[str, Any],
+) -> bool:
+    """
+    若该 posId 最近一条模拟记录已平仓，且其 close_event 里的 cTime 与当前社区仓位一致，
+    说明是“同一笔源仓位”被手动平掉，此时不应立即自动补开。
+    """
+    rec = db.execute(
+        select(FollowSimRecord)
+        .where(
+            FollowSimRecord.follow_account_id == acc_id,
+            FollowSimRecord.pos_id == pid,
+            FollowSimRecord.status == "closed",
+        )
+        .order_by(FollowSimRecord.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if rec is None or rec.close_event_id is None:
+        return False
+    ev = db.get(FollowPositionEvent, rec.close_event_id)
+    if ev is None or not ev.detail_json:
+        return False
+    try:
+        d = json.loads(ev.detail_json)
+    except Exception:
+        return False
+    if not isinstance(d, dict):
+        return False
+    old_ct = str(d.get("cTime", "")).strip()
+    new_ct = str(row.get("cTime", "")).strip()
+    return bool(old_ct) and old_ct == new_ct
+
+
 def _reconcile_sim_follow_set(
     db: Session,
     acc: FollowAccount,
@@ -367,6 +403,8 @@ def _reconcile_sim_follow_set(
         if pid not in new_map:
             continue
         if pid in skip_open_pids:
+            continue
+        if _same_source_position_recently_closed(db, acc_id, pid, new_map[pid]):
             continue
         if not _has_open_sim(db, acc_id, pid):
             sid = _create_sim_open(db, acc, new_map[pid], pid, open_ev=None)

@@ -1,6 +1,12 @@
 """
-每个启用「自动追加」的跟单帐户独立协程：约每 1 秒拉取该帐户绑定 OKX 的永续持仓（mgnRatio），
-当 **mgnRatio ≤ 2（即 ≤200%，接口为比例而非百分数字）** 时按本帐户配置追加逐仓保证金：
+每个启用「自动追加」的跟单帐户独立协程：约每 1 秒拉取该帐户绑定 OKX 的永续持仓（mgnRatio/uplRatio）。
+按配置执行自动动作：
+1) mgnRatio ≤ 维持保证金率阈值：自动追加逐仓保证金
+2) mgnRatio ≤ 平仓保证金率阈值：自动平仓
+3) uplRatio ≥ 止盈收益率阈值：自动平仓
+4) uplRatio ≤ -止损收益率阈值：自动平仓
+
+默认仅在未配置时回退到 mgnRatio ≤ 2（即 ≤200%，接口为比例）追加：
 
     追加 USDT = bet_amount_per_position × margin_add_ratio_of_bet
 
@@ -36,12 +42,16 @@ from v1.Services.okx_contract_helpers import parse_account_config_fields
 
 _last_add_ts: dict[tuple[int, str, str], float] = {}
 """冷却键：(okx_api_accounts.id, instId, posSide)。"""
+_last_close_ts: dict[tuple[int, str, str], float] = {}
+"""平仓冷却键：(okx_api_accounts.id, instId, posSide|net)。"""
 _margin_add_counts: dict[tuple[int, str, str], int] = {}
 """计数键：(follow_accounts.id, instId, posSide)，低于阈值期间累计；mgnRatio（比例）> 阈值后清零。"""
 _margin_key_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 """与冷却键一致：同一 OKX 帐户同一仓位串行化「判冷却 + 调追加接口」，避免多跟单任务并发双发。"""
 COOLDOWN_SEC = 0.5
 """同一 OKX 密钥、同一合约、同一 posSide 两次成功追加之间的最短间隔（秒）。"""
+CLOSE_COOLDOWN_SEC = 0.5
+"""同一 OKX 密钥、同一合约、同一 posSide 两次成功平仓触发之间的最短间隔（秒）。"""
 _ACCOUNT_MARGIN_INTERVAL_SEC = 1.0
 """每个跟单帐户协程的轮询间隔（秒）。"""
 _SUPERVISOR_INTERVAL_SEC = 1.0
@@ -60,6 +70,20 @@ def _get_margin_lock(key: tuple[int, str, str]) -> asyncio.Lock:
 
 def _parse_mgn_ratio_api(raw: object) -> float | None:
     """解析持仓 mgnRatio（比例）：去 %、千分位；无法解析返回 None。"""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    s = s.replace("%", "").replace(",", "").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_ratio_value(raw: object) -> float | None:
+    """解析比例值（如 uplRatio / 配置阈值）：支持字符串数字、百分号与千分位。"""
     if raw is None:
         return None
     s = str(raw).strip()
@@ -145,6 +169,10 @@ def _sync_load_margin_poll_context(follow_account_id: int) -> dict[str, Any] | N
                 else Decimal("0.2")
             ),
             "max_times": acc.margin_add_max_times,
+            "maint_margin_ratio_threshold": acc.maint_margin_ratio_threshold,
+            "close_margin_ratio_threshold": acc.close_margin_ratio_threshold,
+            "take_profit_ratio": acc.take_profit_ratio,
+            "stop_loss_ratio": acc.stop_loss_ratio,
             "api_key": cred.api_key,
             "api_secret": cred.api_secret,
             "api_passphrase": cred.api_passphrase,
@@ -160,9 +188,20 @@ async def _poll_positions_and_maybe_add_margin(
     bet: Decimal,
     add_ratio: Decimal,
     max_times: int | None,
+    maint_margin_ratio_threshold: Decimal | None,
+    close_margin_ratio_threshold: Decimal | None,
+    take_profit_ratio: Decimal | None,
+    stop_loss_ratio: Decimal | None,
     client: OkxFollowOrderClient,
 ) -> None:
-    thr_f = MAINT_MARGIN_RATIO_THRESHOLD
+    add_thr_f = (
+        _parse_ratio_value(maint_margin_ratio_threshold)
+        if maint_margin_ratio_threshold is not None
+        else MAINT_MARGIN_RATIO_THRESHOLD
+    )
+    close_mgn_thr_f = _parse_ratio_value(close_margin_ratio_threshold)
+    tp_ratio_f = _parse_ratio_value(take_profit_ratio)
+    sl_ratio_f = _parse_ratio_value(stop_loss_ratio)
     ok, data = await get_positions_inst("SWAP", client=client)
     if not ok:
         print(f"[margin_monitor] get_positions follow_id={acc_id} okx_id={okx_cred_id}: {data!r}")
@@ -201,9 +240,46 @@ async def _poll_positions_and_maybe_add_margin(
                     f"{inst_id!r} raw={mr!r}"
                 )
             continue
+        upl_ratio = _parse_ratio_value(p.get("uplRatio"))
+
+        # 风控平仓优先于追加：低平仓保证金率 / 达止盈 / 达止损
+        close_reasons: list[str] = []
+        if close_mgn_thr_f is not None and mgn <= close_mgn_thr_f:
+            close_reasons.append(f"mgnRatio<={close_mgn_thr_f}")
+        if tp_ratio_f is not None and upl_ratio is not None and upl_ratio >= tp_ratio_f:
+            close_reasons.append(f"uplRatio>={tp_ratio_f}")
+        if sl_ratio_f is not None and upl_ratio is not None and upl_ratio <= -sl_ratio_f:
+            close_reasons.append(f"uplRatio<=-{sl_ratio_f}")
+        if close_reasons:
+            close_side = None if net_account else (pos_side_raw if pos_side_raw in ("long", "short") else None)
+            close_key = (okx_cred_id, inst_id.upper(), close_side or "net")
+            close_lock = _get_margin_lock(close_key)
+            async with close_lock:
+                now = time.time()
+                if now - _last_close_ts.get(close_key, 0) < CLOSE_COOLDOWN_SEC:
+                    continue
+                ok_close, close_res = await client.close_swap_position(
+                    inst_id, "isolated", close_side
+                )
+                if ok_close:
+                    _last_close_ts[close_key] = time.time()
+                    _margin_add_counts.pop((acc_id, inst_id.lower(), api_pos_side), None)
+                    print(
+                        f"[margin_monitor] close ok follow_id={acc_id} okx_id={okx_cred_id} "
+                        f"{inst_id} posSide={close_side or 'net'} reason={'+'.join(close_reasons)} "
+                        f"mgnRatio~={mgn} uplRatio~={upl_ratio}"
+                    )
+                else:
+                    print(
+                        f"[margin_monitor] close fail follow_id={acc_id} {inst_id} "
+                        f"posSide={close_side or 'net'} reason={'+'.join(close_reasons)}: {close_res!r}"
+                    )
+            await asyncio.sleep(0.35)
+            continue
+
         count_key = (acc_id, inst_id.lower(), api_pos_side)
-        # 比例 > 2 视为高于 200%，安全并清零计数；≤ 2（含等于）则尝试追加
-        if mgn > thr_f:
+        # 比例 > 阈值视为安全并清零计数；≤ 阈值（含等于）则尝试追加
+        if mgn > add_thr_f:
             _margin_add_counts.pop(count_key, None)
             continue
         if max_times is not None and _margin_add_counts.get(count_key, 0) >= max_times:
@@ -261,6 +337,10 @@ async def _account_margin_loop(follow_account_id: int) -> None:
                 bet=ctx["bet"],
                 add_ratio=ctx["add_ratio"],
                 max_times=ctx["max_times"],
+                maint_margin_ratio_threshold=ctx["maint_margin_ratio_threshold"],
+                close_margin_ratio_threshold=ctx["close_margin_ratio_threshold"],
+                take_profit_ratio=ctx["take_profit_ratio"],
+                stop_loss_ratio=ctx["stop_loss_ratio"],
                 client=client,
             )
         except asyncio.CancelledError:

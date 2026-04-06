@@ -127,6 +127,10 @@ def _to_out(
         margin_add_max_times=row.margin_add_max_times,
         okx_api_account_id=row.okx_api_account_id,
         live_trading_enabled=bool(row.live_trading_enabled),
+        maint_margin_ratio_threshold=row.maint_margin_ratio_threshold,
+        close_margin_ratio_threshold=row.close_margin_ratio_threshold,
+        take_profit_ratio=row.take_profit_ratio,
+        stop_loss_ratio=row.stop_loss_ratio,
     )
 
 

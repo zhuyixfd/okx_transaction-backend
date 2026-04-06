@@ -39,6 +39,14 @@ class FollowAccount(Base):
     margin_auto_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 本人持仓保证金自动追加：最多允许追加的次数；NULL 表示不限制（由监控实际执行）。
     margin_add_max_times: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 维持保证金率阈值（比例值，2=200%），仅配置存储，策略逻辑后续按需接入。
+    maint_margin_ratio_threshold: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    # 平仓保证金率阈值（比例值，2=200%），仅配置存储，策略逻辑后续按需接入。
+    close_margin_ratio_threshold: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    # 止盈收益率阈值（比例值，0.2=20%），仅配置存储，策略逻辑后续按需接入。
+    take_profit_ratio: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    # 止损收益率阈值（比例值，0.1=10%），仅配置存储，策略逻辑后续按需接入。
+    stop_loss_ratio: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
 
     # 绑定的 OKX API 帐户（跟单下单/保证金用）；停用跟单不清除此字段。
     okx_api_account_id: Mapped[int | None] = mapped_column(

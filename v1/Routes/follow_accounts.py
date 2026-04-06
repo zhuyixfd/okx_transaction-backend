@@ -639,8 +639,8 @@ async def post_position_action(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
     if rec.status != "open":
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该仓位已平仓")
-    pos_side = (rec.pos_side or "").strip().lower()
-    if pos_side not in ("long", "short"):
+    rec_pos_side = (rec.pos_side or "").strip().lower()
+    if rec_pos_side not in ("long", "short"):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="无效持仓方向")
     if not rec.pos_ccy:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="缺少币种信息")
@@ -653,7 +653,6 @@ async def post_position_action(
         parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
     )
     hedge_mode = cfg_pos_mode != "net_mode"
-    api_pos_side = pos_side if hedge_mode else None
     td_mode = "isolated"
 
     ok_pm, pm_data = await client.set_position_mode("long_short_mode")
@@ -667,7 +666,12 @@ async def post_position_action(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pos_payload)
     base_ccy = inst_id.split("-")[0] if "-" in inst_id else inst_id
 
-    def _row_ok_for_target(row: dict, *, strict_inst: bool) -> bool:
+    def _row_ok_for_target(
+        row: dict,
+        *,
+        strict_inst: bool,
+        prefer_side: str | None,
+    ) -> bool:
         if not isinstance(row, dict):
             return False
         row_inst = str(row.get("instId", "")).strip().upper()
@@ -677,36 +681,77 @@ async def post_position_action(
         else:
             if not row_inst.startswith(f"{base_ccy}-"):
                 return False
-        if str(row.get("mgnMode", "")).strip().lower() != "isolated":
-            return False
         try:
             pos_v = float(str(row.get("pos", "")).strip() or "0")
         except ValueError:
             pos_v = 0.0
         if abs(pos_v) < 1e-12:
             return False
-        row_side = str(row.get("posSide", "")).strip().lower()
-        if hedge_mode and row_side in ("long", "short") and row_side != pos_side:
-            return False
+        if hedge_mode and prefer_side in ("long", "short"):
+            row_side = str(row.get("posSide", "")).strip().lower()
+            if row_side in ("long", "short") and row_side != prefer_side:
+                return False
         return True
 
     target_row: dict | None = None
     for row in (pos_payload.get("data") or []):
-        if _row_ok_for_target(row, strict_inst=True):
+        if _row_ok_for_target(row, strict_inst=True, prefer_side=rec_pos_side):
             target_row = row
             break
     if target_row is None:
         for row in (pos_payload.get("data") or []):
-            if _row_ok_for_target(row, strict_inst=False):
+            if _row_ok_for_target(row, strict_inst=False, prefer_side=rec_pos_side):
+                target_row = row
+                inst_id = str(row.get("instId", "")).strip().upper() or inst_id
+                break
+    # 记录方向可能已过时（例如手工反手后），再做一轮不限方向兜底
+    if target_row is None:
+        for row in (pos_payload.get("data") or []):
+            if _row_ok_for_target(row, strict_inst=True, prefer_side=None):
+                target_row = row
+                break
+    if target_row is None:
+        for row in (pos_payload.get("data") or []):
+            if _row_ok_for_target(row, strict_inst=False, prefer_side=None):
                 target_row = row
                 inst_id = str(row.get("instId", "")).strip().upper() or inst_id
                 break
 
     if target_row is None:
+        rows = pos_payload.get("data") or []
+        same_base_rows: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_inst = str(row.get("instId", "")).strip().upper()
+            if not row_inst.startswith(f"{base_ccy}-"):
+                continue
+            same_base_rows.append(
+                {
+                    "instId": row_inst,
+                    "posSide": str(row.get("posSide", "")).strip().lower(),
+                    "mgnMode": str(row.get("mgnMode", "")).strip().lower(),
+                    "pos": str(row.get("pos", "")).strip(),
+                }
+            )
+        print(
+            f"[position_action] no target follow_id={acc.id} sim_id={rec.id} "
+            f"base={base_ccy} prefer_side={rec_pos_side} rows={same_base_rows!r}"
+        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="未找到当前持仓（请确认该币种仍有仓位并刷新页面）",
+            detail={
+                "msg": "未找到当前持仓（请确认该币种仍有仓位并刷新页面）",
+                "base_ccy": base_ccy,
+                "prefer_pos_side": rec_pos_side,
+                "rows_same_base": same_base_rows,
+            },
         )
+    row_pos_side = str(target_row.get("posSide", "")).strip().lower()
+    pos_side = row_pos_side if row_pos_side in ("long", "short") else rec_pos_side
+    api_pos_side = pos_side if hedge_mode else None
+    row_mgn_mode = str(target_row.get("mgnMode", "")).strip().lower()
+    td_mode = "cross" if row_mgn_mode == "cross" else "isolated"
 
     lever_i: int | None = None
     if target_row is not None:

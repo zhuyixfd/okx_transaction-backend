@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -36,9 +37,20 @@ from v1.Schema.position_pnl_summary import PnlTotalsBlock, PositionPnlSummaryOut
 from v1.Schema.position_snapshot import PositionSnapshotItem, PositionSnapshotOut
 from v1.Services.position_monitor import _sim_pnl_usdt
 from v1.Services.okx_account_client import require_okx_client
+from v1.Services.okx_contract_helpers import (
+    normalize_swap_inst_id,
+    parse_account_config_fields,
+    sizing_lever_from_leverage_info,
+)
 
 
 router = APIRouter(prefix="/follow-accounts", tags=["follow-accounts"])
+
+
+class PositionActionBody(BaseModel):
+    unique_name: str = Field(..., min_length=1, max_length=128)
+    sim_record_id: int = Field(..., ge=1)
+    action: str = Field(..., pattern="^(add|reduce|close|reverse)$")
 
 
 def _upl_ratio_from_detail_json(detail_json: str | None) -> str | None:
@@ -504,6 +516,9 @@ def _sim_to_out(r: FollowSimRecord) -> FollowSimRecordOut:
         src_margin=r.src_margin,
         src_mgn_ratio=r.src_mgn_ratio,
         src_liq_px=r.src_liq_px,
+        add_position_count=int(r.add_position_count or 0),
+        reduce_position_count=int(r.reduce_position_count or 0),
+        add_margin_count=int(r.add_margin_count or 0),
         opened_at=r.opened_at,
         closed_at=r.closed_at,
         updated_at=r.updated_at,
@@ -591,6 +606,146 @@ def delete_follow_sim_record(
     db.delete(rec)
     db.commit()
     return FollowSimRecordDeleteOut(id=record_id)
+
+
+@router.post("/position-action")
+async def post_position_action(
+    body: PositionActionBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    """持仓操作：加仓 / 减仓 / 平仓 / 反手（按跟单配置下注金额）。"""
+    ensure_mysql_db_configured()
+    un = body.unique_name.strip()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if not acc.live_trading_enabled:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="未启用真实交易")
+    if acc.okx_api_account_id is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="未绑定 OKX API 帐户")
+    bet = (
+        Decimal(str(acc.bet_amount_per_position))
+        if acc.bet_amount_per_position is not None
+        else Decimal(0)
+    )
+    if bet <= 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额需大于 0")
+
+    rec = db.get(FollowSimRecord, body.sim_record_id)
+    if rec is None or rec.follow_account_id != acc.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
+    if rec.status != "open":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该仓位已平仓")
+    pos_side = (rec.pos_side or "").strip().lower()
+    if pos_side not in ("long", "short"):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="无效持仓方向")
+    if not rec.pos_ccy:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="缺少币种信息")
+
+    client = require_okx_client(db, acc.okx_api_account_id)
+    inst_id = normalize_swap_inst_id(rec.pos_ccy)
+
+    ok_cfg, cfg_data = await client.get_account_config()
+    _, cfg_pos_mode = (
+        parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+    )
+    hedge_mode = cfg_pos_mode != "net_mode"
+    api_pos_side = pos_side if hedge_mode else None
+    td_mode = "isolated"
+
+    ok_pm, pm_data = await client.set_position_mode("long_short_mode")
+    if not ok_pm:
+        pm_code = str(pm_data.get("code", "")) if isinstance(pm_data, dict) else ""
+        if pm_code != "59000":
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pm_data)
+
+    ok_pos, pos_payload = await client.get_positions_inst("SWAP")
+    if not ok_pos:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pos_payload)
+    target_row: dict | None = None
+    for row in (pos_payload.get("data") or []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("posId", "")).strip() != rec.pos_id:
+            continue
+        if str(row.get("instId", "")).strip().upper() != inst_id:
+            continue
+        target_row = row
+        break
+    if target_row is None and body.action in ("add", "reduce", "reverse"):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="未找到当前持仓")
+
+    lever_i: int | None = None
+    if target_row is not None:
+        try:
+            lever_i = int(float(str(target_row.get("lever", "")).strip()))
+        except ValueError:
+            lever_i = None
+    if lever_i is None:
+        ok_li, li_data = await client.get_leverage_info(inst_id, td_mode)
+        if ok_li:
+            picked = sizing_lever_from_leverage_info(
+                li_data,
+                hedge_mode=hedge_mode,
+                pos_side=pos_side,
+            )
+            lever_i = picked
+    if lever_i is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="无法确定杠杆，请稍后再试")
+
+    principal_s = format(bet, "f").rstrip("0").rstrip(".")
+    if not principal_s:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额无效")
+
+    async def _open_with_side(open_side: str) -> tuple[bool, object]:
+        side = "buy" if open_side == "long" else "sell"
+        return await client.place_swap_market_by_principal_usdt(
+            inst_id,
+            principal_s,
+            leverage=lever_i,
+            td_mode=td_mode,
+            side=side,
+            pos_side=open_side if hedge_mode else None,
+        )
+
+    if body.action == "add":
+        ok_act, payload = await _open_with_side(pos_side)
+        if not ok_act:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
+        rec.add_position_count = int(rec.add_position_count or 0) + 1
+    elif body.action == "reduce":
+        reduce_side = "short" if pos_side == "long" else "long"
+        ok_act, payload = await _open_with_side(reduce_side)
+        if not ok_act:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
+        rec.reduce_position_count = int(rec.reduce_position_count or 0) + 1
+    elif body.action == "close":
+        ok_act, payload = await client.close_swap_position(inst_id, td_mode, api_pos_side)
+        if not ok_act:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
+    else:  # reverse
+        ok_close, payload_close = await client.close_swap_position(inst_id, td_mode, api_pos_side)
+        if not ok_close:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "close", "okx": payload_close})
+        rev_side = "short" if pos_side == "long" else "long"
+        ok_open, payload_open = await _open_with_side(rev_side)
+        if not ok_open:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "reverse_open", "okx": payload_open})
+
+    rec.updated_at = now_cn()
+    db.commit()
+    db.refresh(rec)
+    return {
+        "ok": True,
+        "action": body.action,
+        "sim_record_id": rec.id,
+        "add_position_count": int(rec.add_position_count or 0),
+        "reduce_position_count": int(rec.reduce_position_count or 0),
+        "add_margin_count": int(rec.add_margin_count or 0),
+    }
 
 
 @router.patch("/{account_id}/okx-bind", response_model=FollowAccountOut)

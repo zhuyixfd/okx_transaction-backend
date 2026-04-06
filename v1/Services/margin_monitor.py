@@ -37,6 +37,7 @@ from module.follow_order import (
     okx_client_for_db_secrets,
 )
 from v1.Models.follow_account import FollowAccount
+from v1.Models.follow_sim_record import FollowSimRecord
 from v1.Models.okx_api_account import OkxApiAccount
 from v1.Services.okx_contract_helpers import parse_account_config_fields
 
@@ -181,6 +182,41 @@ def _sync_load_margin_poll_context(follow_account_id: int) -> dict[str, Any] | N
         db.close()
 
 
+def _inst_base_ccy(inst_id: str) -> str:
+    s = str(inst_id).strip().upper()
+    if "-" not in s:
+        return s
+    return s.split("-")[0]
+
+
+def _sync_bump_add_margin_count(acc_id: int, inst_id: str, pos_side: str) -> None:
+    """将追加保证金次数记到当前 open 的模拟行（同币种同方向最新一条）。"""
+    db = SessionLocal()
+    try:
+        ccy = _inst_base_ccy(inst_id)
+        rec = (
+            db.execute(
+                select(FollowSimRecord)
+                .where(
+                    FollowSimRecord.follow_account_id == acc_id,
+                    FollowSimRecord.status == "open",
+                    FollowSimRecord.pos_ccy == ccy,
+                    FollowSimRecord.pos_side == pos_side,
+                )
+                .order_by(FollowSimRecord.id.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if rec is None:
+            return
+        rec.add_margin_count = int(rec.add_margin_count or 0) + 1
+        db.commit()
+    finally:
+        db.close()
+
+
 async def _poll_positions_and_maybe_add_margin(
     *,
     acc_id: int,
@@ -302,6 +338,7 @@ async def _poll_positions_and_maybe_add_margin(
             if ok2:
                 _last_add_ts[cooldown_key] = time.time()
                 _margin_add_counts[count_key] = _margin_add_counts.get(count_key, 0) + 1
+                await asyncio.to_thread(_sync_bump_add_margin_count, acc_id, inst_id, pos_side_raw)
                 print(
                     f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
                     f"{inst_id} {api_pos_side} amt={amt_str} mgnRatio~={mgn} "

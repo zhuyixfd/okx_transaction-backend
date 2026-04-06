@@ -54,6 +54,9 @@ class FollowSimRecord(Base):
     src_margin: Mapped[str | None] = mapped_column(String(64), nullable=True)
     src_mgn_ratio: Mapped[str | None] = mapped_column(String(64), nullable=True)
     src_liq_px: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    add_position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reduce_position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    add_margin_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # 真实跟单：NULL=未走私有下单或仅模拟；True/False=开仓/平仓 API 最终结果（平仓仅在开仓成功时触发）。
     live_open_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

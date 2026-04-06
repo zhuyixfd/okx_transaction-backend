@@ -28,6 +28,9 @@ class FollowSimRecordOut(BaseModel):
     src_margin: Optional[str] = Field(None, description="对方保证金")
     src_mgn_ratio: Optional[str] = Field(None, description="对方维持保证金率")
     src_liq_px: Optional[str] = Field(None, description="对方预估强平价")
+    add_position_count: int = Field(0, description="手动加仓次数")
+    reduce_position_count: int = Field(0, description="手动减仓次数")
+    add_margin_count: int = Field(0, description="追加保证金次数")
     opened_at: datetime
     closed_at: Optional[datetime] = None
     updated_at: datetime

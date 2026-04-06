@@ -807,6 +807,39 @@ async def post_position_action(
             pos_side=reduce_pos_side,
         )
 
+    def _manual_close_sim_record(*, close_row: dict | None) -> None:
+        row = close_row if isinstance(close_row, dict) else {}
+        pid = str(row.get("posId", "")).strip() or rec.pos_id
+        exit_px = str(row.get("last", "")).strip() or str(row.get("avgPx", "")).strip() or rec.last_mark_px or rec.entry_avg_px or "0"
+        ev = FollowPositionEvent(
+            follow_account_id=acc.id,
+            unique_name=acc.unique_name or "",
+            event_type="close",
+            pos_id=pid,
+            pos_ccy=(str(row.get("posCcy", "")).strip() or rec.pos_ccy),
+            pos_side=(str(row.get("posSide", "")).strip() or rec.pos_side),
+            lever=(str(row.get("lever", "")).strip() or None),
+            avg_px=(str(row.get("avgPx", "")).strip() or rec.entry_avg_px),
+            last_px=exit_px,
+            c_time=(str(row.get("cTime", "")).strip() or None),
+            detail_json=json.dumps(row, ensure_ascii=False) if row else None,
+        )
+        db.add(ev)
+        db.flush()
+
+        rec.status = "closed"
+        rec.realized_pnl_usdt = _sim_pnl_usdt(
+            rec.stake_usdt,
+            rec.entry_avg_px,
+            exit_px,
+            rec.pos_side,
+        )
+        rec.unrealized_pnl_usdt = Decimal(0)
+        rec.exit_px = exit_px
+        rec.last_mark_px = exit_px
+        rec.close_event_id = ev.id
+        rec.closed_at = now_cn()
+
     if body.action == "add":
         ok_act, payload = await _place_open_with_side(pos_side)
         if not ok_act:
@@ -822,10 +855,12 @@ async def post_position_action(
         ok_act, payload = await client.close_swap_position(inst_id, td_mode, api_pos_side)
         if not ok_act:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
+        _manual_close_sim_record(close_row=target_row)
     else:  # reverse
         ok_close, payload_close = await client.close_swap_position(inst_id, td_mode, api_pos_side)
         if not ok_close:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "close", "okx": payload_close})
+        _manual_close_sim_record(close_row=target_row)
         if target_row is None:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="反手失败：未找到原仓位保证金")
         margin_raw = str(target_row.get("margin", "")).strip()
@@ -849,7 +884,6 @@ async def post_position_action(
         )
         if not ok_open:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "reverse_open", "okx": payload_open})
-        rec.total_invested_usdt = Decimal(str(rec.total_invested_usdt or 0)) + Decimal(principal_str)
 
     rec.updated_at = now_cn()
     db.commit()

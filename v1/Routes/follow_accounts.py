@@ -508,6 +508,8 @@ def _sim_to_out(r: FollowSimRecord) -> FollowSimRecordOut:
         entry_avg_px=r.entry_avg_px,
         stake_usdt=r.stake_usdt,
         status=r.status,
+        open_event_id=r.open_event_id,
+        close_event_id=r.close_event_id,
         exit_px=r.exit_px,
         realized_pnl_usdt=r.realized_pnl_usdt,
         unrealized_pnl_usdt=r.unrealized_pnl_usdt,

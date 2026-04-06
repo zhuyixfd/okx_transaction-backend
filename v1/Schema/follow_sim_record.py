@@ -18,6 +18,8 @@ class FollowSimRecordOut(BaseModel):
     entry_avg_px: Optional[str] = None
     stake_usdt: Decimal = Field(..., description="模拟本金（USDT）")
     status: str = Field(..., description="open=跟单中 | closed=已平仓")
+    open_event_id: Optional[int] = None
+    close_event_id: Optional[int] = None
     exit_px: Optional[str] = None
     realized_pnl_usdt: Optional[Decimal] = Field(None, description="已平仓已实现盈亏（USDT）")
     unrealized_pnl_usdt: Decimal = Field(

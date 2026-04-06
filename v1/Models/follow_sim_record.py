@@ -57,6 +57,9 @@ class FollowSimRecord(Base):
     add_position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reduce_position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     add_margin_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_invested_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(24, 8), nullable=False, default=Decimal("0")
+    )
 
     # 真实跟单：NULL=未走私有下单或仅模拟；True/False=开仓/平仓 API 最终结果（平仓仅在开仓成功时触发）。
     live_open_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

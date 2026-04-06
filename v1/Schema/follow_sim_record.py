@@ -31,6 +31,7 @@ class FollowSimRecordOut(BaseModel):
     add_position_count: int = Field(0, description="手动加仓次数")
     reduce_position_count: int = Field(0, description="手动减仓次数")
     add_margin_count: int = Field(0, description="追加保证金次数")
+    total_invested_usdt: Decimal = Field(..., description="累计投入（本金+加仓+追加保证金）")
     opened_at: datetime
     closed_at: Optional[datetime] = None
     updated_at: datetime
@@ -43,7 +44,7 @@ class FollowSimRecordOut(BaseModel):
         assert out is not None
         return out
 
-    @field_serializer("stake_usdt", "realized_pnl_usdt", "unrealized_pnl_usdt")
+    @field_serializer("stake_usdt", "realized_pnl_usdt", "unrealized_pnl_usdt", "total_invested_usdt")
     def _dec_str(self, v: Decimal | None) -> str | None:
         if v is None:
             return None

@@ -189,7 +189,7 @@ def _inst_base_ccy(inst_id: str) -> str:
     return s.split("-")[0]
 
 
-def _sync_bump_add_margin_count(acc_id: int, inst_id: str, pos_side: str) -> None:
+def _sync_bump_add_margin_count(acc_id: int, inst_id: str, pos_side: str, amt: str) -> None:
     """将追加保证金次数记到当前 open 的模拟行（同币种同方向最新一条）。"""
     db = SessionLocal()
     try:
@@ -212,6 +212,11 @@ def _sync_bump_add_margin_count(acc_id: int, inst_id: str, pos_side: str) -> Non
         if rec is None:
             return
         rec.add_margin_count = int(rec.add_margin_count or 0) + 1
+        try:
+            add_amt = Decimal(str(amt).strip())
+        except Exception:
+            add_amt = Decimal(0)
+        rec.total_invested_usdt = Decimal(str(rec.total_invested_usdt or 0)) + max(add_amt, Decimal(0))
         db.commit()
     finally:
         db.close()
@@ -338,7 +343,7 @@ async def _poll_positions_and_maybe_add_margin(
             if ok2:
                 _last_add_ts[cooldown_key] = time.time()
                 _margin_add_counts[count_key] = _margin_add_counts.get(count_key, 0) + 1
-                await asyncio.to_thread(_sync_bump_add_margin_count, acc_id, inst_id, pos_side_raw)
+                await asyncio.to_thread(_sync_bump_add_margin_count, acc_id, inst_id, pos_side_raw, amt_str)
                 print(
                     f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
                     f"{inst_id} {api_pos_side} amt={amt_str} mgnRatio~={mgn} "

@@ -118,6 +118,7 @@ CREATE TABLE `follow_sim_records` (
   `add_position_count` INT NOT NULL DEFAULT 0,
   `reduce_position_count` INT NOT NULL DEFAULT 0,
   `add_margin_count` INT NOT NULL DEFAULT 0,
+  `total_invested_usdt` DECIMAL(24,8) NOT NULL DEFAULT 0.00000000,
   `live_open_ok` TINYINT(1) NULL DEFAULT NULL,
   `live_close_ok` TINYINT(1) NULL DEFAULT NULL,
   `opened_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),

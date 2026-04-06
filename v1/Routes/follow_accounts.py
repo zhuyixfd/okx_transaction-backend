@@ -519,6 +519,7 @@ def _sim_to_out(r: FollowSimRecord) -> FollowSimRecordOut:
         add_position_count=int(r.add_position_count or 0),
         reduce_position_count=int(r.reduce_position_count or 0),
         add_margin_count=int(r.add_margin_count or 0),
+        total_invested_usdt=Decimal(str(r.total_invested_usdt or 0)),
         opened_at=r.opened_at,
         closed_at=r.closed_at,
         updated_at=r.updated_at,
@@ -809,6 +810,7 @@ async def post_position_action(
         if not ok_act:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
         rec.add_position_count = int(rec.add_position_count or 0) + 1
+        rec.total_invested_usdt = Decimal(str(rec.total_invested_usdt or 0)) + Decimal(principal_s)
     elif body.action == "reduce":
         ok_act, payload = await _place_reduce_for_side(pos_side)
         if not ok_act:
@@ -845,6 +847,7 @@ async def post_position_action(
         )
         if not ok_open:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "reverse_open", "okx": payload_open})
+        rec.total_invested_usdt = Decimal(str(rec.total_invested_usdt or 0)) + Decimal(principal_str)
 
     rec.updated_at = now_cn()
     db.commit()

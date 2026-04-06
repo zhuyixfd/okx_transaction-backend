@@ -252,6 +252,7 @@ def _create_sim_open(
         src_margin=sm,
         src_mgn_ratio=smr,
         src_liq_px=slx,
+        total_invested_usdt=stake,
     )
     db.add(rec)
     db.flush()

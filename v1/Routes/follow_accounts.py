@@ -798,22 +798,6 @@ async def post_position_action(
             pos_side=reduce_pos_side,
         )
 
-    async def _place_open_with_sz(open_side: str, sz: str) -> tuple[bool, object]:
-        side = "buy" if open_side == "long" else "sell"
-        params: dict[str, str] = {
-            "instId": inst_id,
-            "tdMode": td_mode,
-            "side": side,
-            "ordType": "market",
-            "sz": sz,
-        }
-        if hedge_mode:
-            params["posSide"] = open_side
-        if "-SWAP" in inst_id and td_mode == "isolated":
-            parts = inst_id.split("-")
-            params["ccy"] = parts[1] if len(parts) >= 2 and parts[1] else "USDT"
-        return await client.place_order(params)
-
     if body.action == "add":
         ok_act, payload = await _place_open_with_side(pos_side)
         if not ok_act:
@@ -833,17 +817,26 @@ async def post_position_action(
         if not ok_close:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "close", "okx": payload_close})
         if target_row is None:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="反手失败：未找到原仓位数量")
-        pos_raw = str(target_row.get("pos", "")).strip()
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="反手失败：未找到原仓位保证金")
+        margin_raw = str(target_row.get("margin", "")).strip()
+        if margin_raw == "":
+            margin_raw = str(target_row.get("imr", "")).strip()
         try:
-            pos_abs = abs(float(pos_raw))
+            principal_val = abs(float(margin_raw))
         except ValueError:
-            pos_abs = 0.0
-        sz_str = f"{pos_abs:.8f}".rstrip("0").rstrip(".")
-        if not sz_str or sz_str == "0":
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="反手失败：原仓位数量无效")
+            principal_val = 0.0
+        principal_str = f"{principal_val:.8f}".rstrip("0").rstrip(".")
+        if not principal_str or principal_str == "0":
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="反手失败：原仓位保证金无效")
         rev_side = "short" if pos_side == "long" else "long"
-        ok_open, payload_open = await _place_open_with_sz(rev_side, sz_str)
+        ok_open, payload_open = await client.place_swap_market_by_principal_usdt(
+            inst_id,
+            principal_str,
+            leverage=lever_i,
+            td_mode=td_mode,
+            side="buy" if rev_side == "long" else "sell",
+            pos_side=rev_side if hedge_mode else None,
+        )
         if not ok_open:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "reverse_open", "okx": payload_open})
 

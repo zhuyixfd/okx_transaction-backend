@@ -665,18 +665,48 @@ async def post_position_action(
     ok_pos, pos_payload = await client.get_positions_inst("SWAP")
     if not ok_pos:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pos_payload)
+    base_ccy = inst_id.split("-")[0] if "-" in inst_id else inst_id
+
+    def _row_ok_for_target(row: dict, *, strict_inst: bool) -> bool:
+        if not isinstance(row, dict):
+            return False
+        row_inst = str(row.get("instId", "")).strip().upper()
+        if strict_inst:
+            if row_inst != inst_id:
+                return False
+        else:
+            if not row_inst.startswith(f"{base_ccy}-"):
+                return False
+        if str(row.get("mgnMode", "")).strip().lower() != "isolated":
+            return False
+        try:
+            pos_v = float(str(row.get("pos", "")).strip() or "0")
+        except ValueError:
+            pos_v = 0.0
+        if abs(pos_v) < 1e-12:
+            return False
+        row_side = str(row.get("posSide", "")).strip().lower()
+        if hedge_mode and row_side in ("long", "short") and row_side != pos_side:
+            return False
+        return True
+
     target_row: dict | None = None
     for row in (pos_payload.get("data") or []):
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("posId", "")).strip() != rec.pos_id:
-            continue
-        if str(row.get("instId", "")).strip().upper() != inst_id:
-            continue
-        target_row = row
-        break
-    if target_row is None and body.action in ("add", "reduce", "reverse"):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="未找到当前持仓")
+        if _row_ok_for_target(row, strict_inst=True):
+            target_row = row
+            break
+    if target_row is None:
+        for row in (pos_payload.get("data") or []):
+            if _row_ok_for_target(row, strict_inst=False):
+                target_row = row
+                inst_id = str(row.get("instId", "")).strip().upper() or inst_id
+                break
+
+    if target_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="未找到当前持仓（请确认该币种仍有仓位并刷新页面）",
+        )
 
     lever_i: int | None = None
     if target_row is not None:
@@ -700,7 +730,7 @@ async def post_position_action(
     if not principal_s:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额无效")
 
-    async def _open_with_side(open_side: str) -> tuple[bool, object]:
+    async def _place_open_with_side(open_side: str) -> tuple[bool, object]:
         side = "buy" if open_side == "long" else "sell"
         return await client.place_swap_market_by_principal_usdt(
             inst_id,
@@ -711,14 +741,25 @@ async def post_position_action(
             pos_side=open_side if hedge_mode else None,
         )
 
+    async def _place_reduce_for_side(current_side: str) -> tuple[bool, object]:
+        side = "sell" if current_side == "long" else "buy"
+        reduce_pos_side = current_side if hedge_mode else None
+        return await client.place_swap_market_by_principal_usdt(
+            inst_id,
+            principal_s,
+            leverage=lever_i,
+            td_mode=td_mode,
+            side=side,
+            pos_side=reduce_pos_side,
+        )
+
     if body.action == "add":
-        ok_act, payload = await _open_with_side(pos_side)
+        ok_act, payload = await _place_open_with_side(pos_side)
         if not ok_act:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
         rec.add_position_count = int(rec.add_position_count or 0) + 1
     elif body.action == "reduce":
-        reduce_side = "short" if pos_side == "long" else "long"
-        ok_act, payload = await _open_with_side(reduce_side)
+        ok_act, payload = await _place_reduce_for_side(pos_side)
         if not ok_act:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload)
         rec.reduce_position_count = int(rec.reduce_position_count or 0) + 1
@@ -731,7 +772,7 @@ async def post_position_action(
         if not ok_close:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "close", "okx": payload_close})
         rev_side = "short" if pos_side == "long" else "long"
-        ok_open, payload_open = await _open_with_side(rev_side)
+        ok_open, payload_open = await _place_open_with_side(rev_side)
         if not ok_open:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail={"step": "reverse_open", "okx": payload_open})
 

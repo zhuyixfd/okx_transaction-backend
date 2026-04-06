@@ -809,20 +809,42 @@ async def post_position_action(
 
     def _manual_close_sim_record(*, close_row: dict | None) -> None:
         row = close_row if isinstance(close_row, dict) else {}
-        pid = str(row.get("posId", "")).strip() or rec.pos_id
-        exit_px = str(row.get("last", "")).strip() or str(row.get("avgPx", "")).strip() or rec.last_mark_px or rec.entry_avg_px or "0"
+        source_pid = rec.pos_id
+
+        src_row: dict | None = None
+        snap = db.get(FollowPositionSnapshot, acc.id)
+        if snap is not None and snap.snapshot_json:
+            try:
+                snap_map = json.loads(snap.snapshot_json)
+                if isinstance(snap_map, dict):
+                    maybe = snap_map.get(source_pid)
+                    if isinstance(maybe, dict):
+                        src_row = maybe
+            except Exception:
+                src_row = None
+
+        event_row = src_row or {}
+        exit_px = (
+            str(row.get("last", "")).strip()
+            or str(row.get("avgPx", "")).strip()
+            or str(event_row.get("last", "")).strip()
+            or str(event_row.get("avgPx", "")).strip()
+            or rec.last_mark_px
+            or rec.entry_avg_px
+            or "0"
+        )
         ev = FollowPositionEvent(
             follow_account_id=acc.id,
             unique_name=acc.unique_name or "",
             event_type="close",
-            pos_id=pid,
-            pos_ccy=(str(row.get("posCcy", "")).strip() or rec.pos_ccy),
-            pos_side=(str(row.get("posSide", "")).strip() or rec.pos_side),
-            lever=(str(row.get("lever", "")).strip() or None),
-            avg_px=(str(row.get("avgPx", "")).strip() or rec.entry_avg_px),
+            pos_id=source_pid,
+            pos_ccy=(str(event_row.get("posCcy", "")).strip() or rec.pos_ccy),
+            pos_side=(str(event_row.get("posSide", "")).strip() or rec.pos_side),
+            lever=(str(event_row.get("lever", "")).strip() or None),
+            avg_px=(str(event_row.get("avgPx", "")).strip() or rec.entry_avg_px),
             last_px=exit_px,
-            c_time=(str(row.get("cTime", "")).strip() or None),
-            detail_json=json.dumps(row, ensure_ascii=False) if row else None,
+            c_time=(str(event_row.get("cTime", "")).strip() or None),
+            detail_json=json.dumps(event_row, ensure_ascii=False) if event_row else None,
         )
         db.add(ev)
         db.flush()

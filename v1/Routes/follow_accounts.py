@@ -53,6 +53,11 @@ class PositionActionBody(BaseModel):
     action: str = Field(..., pattern="^(add|reduce|close|reverse)$")
 
 
+class SnapshotFollowBody(BaseModel):
+    unique_name: str = Field(..., min_length=1, max_length=128)
+    pos_id: str = Field(..., min_length=1, max_length=64)
+
+
 def _upl_ratio_from_detail_json(detail_json: str | None) -> str | None:
     if not detail_json or not str(detail_json).strip():
         return None
@@ -951,6 +956,137 @@ async def post_position_action(
         "reduce_position_count": int(action_rec.reduce_position_count or 0),
         "add_margin_count": int(action_rec.add_margin_count or 0),
     }
+
+
+@router.post("/snapshot-follow")
+async def snapshot_follow_once(
+    body: SnapshotFollowBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    """按「对方持仓」单条记录执行一次跟单开仓。"""
+    ensure_mysql_db_configured()
+    un = body.unique_name.strip()
+    pid = body.pos_id.strip()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    if not acc.live_trading_enabled:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="未启用真实交易")
+    if acc.okx_api_account_id is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="未绑定 OKX API 帐户")
+
+    bet = Decimal(str(acc.bet_amount_per_position or 0))
+    if bet <= 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额需大于 0")
+    principal_s = format(bet, "f").rstrip("0").rstrip(".")
+    if not principal_s:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额无效")
+
+    snap = db.get(FollowPositionSnapshot, acc.id)
+    if snap is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到对方持仓快照")
+    try:
+        snap_map = json.loads(snap.snapshot_json)
+    except Exception:
+        snap_map = {}
+    row = snap_map.get(pid) if isinstance(snap_map, dict) else None
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到对应持仓")
+
+    ccy = str(row.get("posCcy", "")).strip().upper()
+    pos_side = str(row.get("posSide", "")).strip().lower()
+    if not ccy or pos_side not in ("long", "short"):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="持仓方向或币种无效")
+    inst_id = normalize_swap_inst_id(ccy)
+
+    client = require_okx_client(db, acc.okx_api_account_id)
+    ok_cfg, cfg_data = await client.get_account_config()
+    _, cfg_pos_mode = parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+    hedge_mode = cfg_pos_mode != "net_mode"
+    td_mode = "isolated"
+
+    ok_pm, pm_data = await client.set_position_mode("long_short_mode")
+    if not ok_pm:
+        pm_code = str(pm_data.get("code", "")) if isinstance(pm_data, dict) else ""
+        if pm_code != "59000":
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pm_data)
+
+    ok_pos, pos_payload = await client.get_positions_inst("SWAP")
+    if not ok_pos:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pos_payload)
+    for p in (pos_payload.get("data") or []):
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("instId", "")).strip().upper() != inst_id:
+            continue
+        try:
+            pv = float(str(p.get("pos", "")).strip() or "0")
+        except ValueError:
+            pv = 0.0
+        if abs(pv) > 1e-12:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该币种当前已有持仓")
+
+    lever_i: int | None = None
+    lv_raw = str(row.get("lever", "")).strip()
+    if lv_raw:
+        try:
+            lever_i = int(float(lv_raw))
+        except ValueError:
+            lever_i = None
+    if lever_i is None:
+        ok_li, li_data = await client.get_leverage_info(inst_id, td_mode)
+        if ok_li:
+            lever_i = sizing_lever_from_leverage_info(li_data, hedge_mode=hedge_mode, pos_side=pos_side)
+    if lever_i is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="无法确定杠杆，请稍后再试")
+
+    ok_open, payload_open = await client.place_swap_market_by_principal_usdt(
+        inst_id,
+        principal_s,
+        leverage=lever_i,
+        td_mode=td_mode,
+        side="buy" if pos_side == "long" else "sell",
+        pos_side=pos_side if hedge_mode else None,
+    )
+    if not ok_open:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload_open)
+
+    now = now_cn()
+    rec = FollowSimRecord(
+        follow_account_id=acc.id,
+        pos_id=pid,
+        pos_ccy=ccy,
+        pos_side=pos_side,
+        entry_avg_px=(str(row.get("avgPx", "")).strip() or None),
+        stake_usdt=Decimal(principal_s),
+        status="open",
+        open_event_id=None,
+        close_event_id=None,
+        exit_px=None,
+        realized_pnl_usdt=None,
+        unrealized_pnl_usdt=Decimal(0),
+        last_mark_px=(str(row.get("last", "")).strip() or None),
+        src_pos=(str(row.get("pos", "")).strip() or None),
+        src_margin=(str(row.get("margin", "")).strip() or None),
+        src_mgn_ratio=(str(row.get("mgnRatio", "")).strip() or None),
+        src_liq_px=(str(row.get("liqPx", "")).strip() or None),
+        add_position_count=0,
+        reduce_position_count=0,
+        add_margin_count=0,
+        total_invested_usdt=Decimal(principal_s),
+        live_open_ok=True,
+        live_close_ok=None,
+        opened_at=now,
+        closed_at=None,
+        updated_at=now,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return {"ok": True, "sim_record_id": rec.id}
 
 
 @router.patch("/{account_id}/okx-bind", response_model=FollowAccountOut)

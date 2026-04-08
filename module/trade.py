@@ -146,6 +146,9 @@ class OkxTrade:
                 "last": pos.get("last"),
                 "uplRatio": _fmt_upl_ratio_pct(pos),
                 "upl": _fmt_upl_usdt(pos),
+                "notionalUsd": pos.get("notionalUsd", pos.get("notional_usd", "")),
+                "notionalCcy": pos.get("notionalCcy", pos.get("notional_ccy", "")),
+                "notional": pos.get("notional", ""),
             })
         return res
 

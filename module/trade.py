@@ -1,5 +1,6 @@
 import re
 import time
+import json
 from datetime import datetime
 
 import aiohttp
@@ -62,6 +63,7 @@ class OkxTrade:
         "https://www.oyigwcn.biz/priapi/v5/ecotrade/public/community/user/position-current"
     )
     _session: aiohttp.ClientSession | None = None
+    overview_page_tpl: str = "https://www.oyigwcn.biz/zh-hans/copy-trading/account/{unique_name}?tab=trade"
 
     def __init__(self):
         pass
@@ -117,6 +119,63 @@ class OkxTrade:
         ) as response:
             data = await response.json()
             return await cls.clean_position_current(data)
+
+    @classmethod
+    async def get_overview_data(cls, unique_name: str) -> dict:
+        """
+        从交易员公开页 HTML 中解析 overviewData。
+        返回形如：
+        {
+            "ccy": "...",
+            "equity": "...",
+            ...
+        }
+        """
+        url = cls.overview_page_tpl.format(unique_name=unique_name.strip())
+        session = cls.get_session()
+        async with session.get(url, allow_redirects=True) as response:
+            html = await response.text()
+
+        m = re.search(r'"overviewData"\s*:\s*\{', html)
+        if not m:
+            return {}
+        start = html.find("{", m.start())
+        if start < 0:
+            return {}
+
+        depth = 0
+        end = -1
+        in_str = False
+        esc = False
+        for i in range(start, len(html)):
+            ch = html[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end <= start:
+            return {}
+
+        raw_obj = html[start:end + 1]
+        try:
+            d = json.loads(raw_obj)
+        except Exception:
+            return {}
+        return d if isinstance(d, dict) else {}
 
     @staticmethod
     async def clean_position_current(data: dict):

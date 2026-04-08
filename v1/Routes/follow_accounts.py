@@ -402,6 +402,22 @@ def get_position_snapshot(
     )
 
 
+@router.get("/overview-data")
+async def get_overview_data(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+) -> dict:
+    """从交易员公开页 HTML 解析 overviewData；equity 即资产余额。"""
+    ensure_mysql_db_configured()
+    un = unique_name.strip()
+    d = await OkxTrade.get_overview_data(un)
+    equity = d.get("equity") if isinstance(d, dict) else None
+    return {
+        "unique_name": un,
+        "overview_data": d if isinstance(d, dict) else {},
+        "equity": None if equity is None else str(equity),
+    }
+
+
 @router.get("/linked-okx/fills")
 async def linked_okx_trade_fills(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),

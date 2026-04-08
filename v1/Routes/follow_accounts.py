@@ -116,6 +116,25 @@ def _row_str(row: dict, key: str) -> str | None:
     return s if s else None
 
 
+def _snapshot_notional_usd(row: dict) -> str | None:
+    for k in ("notionalUsd", "notional_usd", "notionalUSDT", "notional_usdt"):
+        s = _row_str(row, k)
+        if s is not None:
+            return s
+    # 兜底：若接口未给 notionalUsd，则按 持仓量 * 标记价格 估算
+    pos_s = _row_str(row, "pos")
+    last_s = _row_str(row, "last")
+    try:
+        pos_v = Decimal(str(pos_s)) if pos_s is not None else None
+        last_v = Decimal(str(last_s)) if last_s is not None else None
+    except Exception:
+        pos_v = None
+        last_v = None
+    if pos_v is None or last_v is None:
+        return None
+    return format(abs(pos_v * last_v), "f")
+
+
 def _normalize_link(url: str) -> str:
     return str(url).strip().rstrip("/")
 
@@ -281,8 +300,8 @@ def _snapshot_row_to_item(row: dict) -> PositionSnapshotItem:
         upl_ratio=upl_s,
         upl=upl_usdt,
         pos=_row_str(row, "pos"),
-        notional_usd=_row_str(row, "notionalUsd"),
-        notional_ccy=_row_str(row, "notionalCcy"),
+        notional_usd=_snapshot_notional_usd(row),
+        notional_ccy=_row_str(row, "notionalCcy") or _row_str(row, "notional_ccy"),
         notional=_row_str(row, "notional"),
         margin=_row_str(row, "margin"),
         mgn_ratio=_row_str(row, "mgnRatio"),

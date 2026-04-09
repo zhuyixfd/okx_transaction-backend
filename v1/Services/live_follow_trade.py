@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from decimal import Decimal
 
 from config.cn_time import now_cn
 from config.db import SessionLocal
@@ -81,6 +82,7 @@ class LiveFollowOpenIntent:
     pos_side: str
     lever_str: str | None
     principal_usdt: str
+    principal_ratio_of_my_equity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,19 @@ class LiveFollowCloseIntent:
     sim_record_id: int
     inst_id: str
     pos_side: str | None
+
+
+@dataclass(frozen=True)
+class LiveFollowAdjustIntent:
+    follow_account_id: int
+    okx_api_account_id: int
+    sim_record_id: int
+    inst_id: str
+    pos_side: str
+    lever_str: str | None
+    action: str  # add | reduce
+    add_ratio_of_my_equity: str | None = None
+    reduce_ratio_of_my_notional: str | None = None
 
 
 def _set_live_open_ok(sim_id: int, value: bool) -> None:
@@ -249,9 +264,30 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                 return
             sizing_lever = picked
 
+        principal_s = intent.principal_usdt.strip()
+        if not principal_s and intent.principal_ratio_of_my_equity:
+            ratio = _dec(intent.principal_ratio_of_my_equity)
+            if ratio is None or ratio <= 0:
+                _set_live_open_ok(intent.sim_record_id, False)
+                return
+            ok_bal, bal = await client.get_account_balance("USDT")
+            if not ok_bal or not isinstance(bal, dict):
+                _set_live_open_ok(intent.sim_record_id, False)
+                return
+            b0 = (bal.get("data") or [None])[0]
+            total_eq = _dec((b0 or {}).get("totalEq")) if isinstance(b0, dict) else None
+            if total_eq is None or total_eq <= 0:
+                _set_live_open_ok(intent.sim_record_id, False)
+                return
+            principal = total_eq * ratio
+            principal_s = format(principal, "f").rstrip("0").rstrip(".")
+            if not principal_s:
+                _set_live_open_ok(intent.sim_record_id, False)
+                return
+
         ok_order, payload = await client.place_swap_market_by_principal_usdt(
             inst_id,
-            intent.principal_usdt.strip(),
+            principal_s,
             leverage=sizing_lever,
             td_mode=td_mode,
             side=side,
@@ -325,9 +361,119 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
     _set_live_close_ok(intent.sim_record_id, True)
 
 
+def _dec(raw: object) -> Decimal | None:
+    try:
+        d = Decimal(str(raw).strip())
+    except Exception:
+        return None
+    return d
+
+
+async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
+    db = SessionLocal()
+    try:
+        cred = db.get(OkxApiAccount, intent.okx_api_account_id)
+        if cred is None:
+            return
+        client = okx_client_for_db_secrets(cred.api_key, cred.api_secret, cred.api_passphrase)
+        if not client.is_configured():
+            return
+    finally:
+        db.close()
+
+    ok_cfg, cfg_data = await client.get_account_config()
+    acct_lv, cfg_pos_mode = (
+        parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+    )
+    blocked = isolated_td_mode_blocked_reason(acct_lv)
+    if blocked:
+        return
+    td_mode = LIVE_FOLLOW_TD_MODE
+    hedge_mode = cfg_pos_mode != "net_mode"
+
+    ok_pos, pos_data = await client.get_positions_inst("SWAP")
+    if not ok_pos or not isinstance(pos_data, dict):
+        return
+    target_row: dict | None = None
+    for row in pos_data.get("data") or []:
+        if not isinstance(row, dict):
+            continue
+        if not _okx_swap_row_matches_follow_open(
+            row,
+            inst_id=intent.inst_id,
+            want_side=intent.pos_side,
+            hedge_mode=hedge_mode,
+        ):
+            continue
+        target_row = row
+        break
+    if target_row is None:
+        return
+
+    principal: Decimal | None = None
+    if intent.action == "add":
+        ratio = _dec(intent.add_ratio_of_my_equity)
+        if ratio is None or ratio <= 0:
+            return
+        ok_bal, bal = await client.get_account_balance("USDT")
+        if not ok_bal or not isinstance(bal, dict):
+            return
+        b0 = (bal.get("data") or [None])[0]
+        total_eq = _dec((b0 or {}).get("totalEq")) if isinstance(b0, dict) else None
+        if total_eq is None or total_eq <= 0:
+            return
+        principal = total_eq * ratio
+    else:
+        ratio = _dec(intent.reduce_ratio_of_my_notional)
+        if ratio is None or ratio <= 0:
+            return
+        notional = _dec(target_row.get("notionalUsd")) or _dec(target_row.get("notional"))
+        if notional is None or notional <= 0:
+            return
+        principal = notional * ratio
+    if principal is None or principal <= 0:
+        return
+
+    principal_s = format(principal, "f").rstrip("0").rstrip(".")
+    if not principal_s:
+        return
+
+    lever_i: int | None = None
+    if intent.lever_str:
+        try:
+            lever_i = int(intent.lever_str)
+        except ValueError:
+            lever_i = None
+    if lever_i is None:
+        ok_li, li_data = await client.get_leverage_info(intent.inst_id, td_mode)
+        if ok_li:
+            lever_i = sizing_lever_from_leverage_info(
+                li_data, hedge_mode=hedge_mode, pos_side=intent.pos_side
+            )
+    if lever_i is None:
+        return
+
+    side: str
+    if intent.action == "add":
+        side = "buy" if intent.pos_side == "long" else "sell"
+    else:
+        side = "sell" if intent.pos_side == "long" else "buy"
+    ok_order, _ = await client.place_swap_market_by_principal_usdt(
+        intent.inst_id,
+        principal_s,
+        leverage=lever_i,
+        td_mode=td_mode,
+        side=side,
+        pos_side=intent.pos_side if hedge_mode else None,
+    )
+    if not ok_order:
+        return
+
+
 async def run_live_follow_intents(
     close_intents: list[LiveFollowCloseIntent],
     open_intents: list[LiveFollowOpenIntent],
+    adjust_intents: list[LiveFollowAdjustIntent] | None = None,
 ) -> None:
     """先平后开，与同轮快照中欧易侧先关后开的节奏一致。"""
     for it in close_intents:
@@ -340,3 +486,5 @@ async def run_live_follow_intents(
             continue
         seen_open.add(key)
         await execute_live_follow_open(it)
+    for it in (adjust_intents or []):
+        await execute_live_follow_adjust(it)

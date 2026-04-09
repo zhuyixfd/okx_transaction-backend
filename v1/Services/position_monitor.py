@@ -17,6 +17,7 @@ from v1.Models.follow_account import FollowAccount
 from v1.Models.follow_position import FollowPositionEvent, FollowPositionSnapshot
 from v1.Models.follow_sim_record import FollowSimRecord
 from v1.Services.live_follow_trade import (
+    LiveFollowAdjustIntent,
     LiveFollowCloseIntent,
     LiveFollowOpenIntent,
     run_live_follow_intents,
@@ -153,6 +154,24 @@ def _to_dec(s: str | None) -> Decimal:
         return Decimal(0)
 
 
+def _row_notional_usd(row: dict[str, Any]) -> Decimal:
+    for k in ("notionalUsd", "notional", "notionalCcy"):
+        v = row.get(k)
+        if v is None or str(v).strip() == "":
+            continue
+        try:
+            d = Decimal(str(v).strip())
+            if d != 0:
+                return abs(d)
+        except Exception:
+            continue
+    pos = _to_dec(str(row.get("pos", "")).strip() or None)
+    last = _to_dec(str(row.get("last", "")).strip() or None)
+    if pos == 0 or last == 0:
+        return Decimal(0)
+    return abs(pos * last)
+
+
 def _sim_pnl_usdt(
     stake: Decimal,
     entry_s: str | None,
@@ -185,6 +204,8 @@ def _append_live_follow_open_intent(
     row: dict[str, Any],
     pid: str,
     open_intents: list[LiveFollowOpenIntent],
+    *,
+    source_equity_usdt: Decimal | None,
 ) -> None:
     if not _should_emit_live_open(acc):
         return
@@ -194,12 +215,21 @@ def _append_live_follow_open_intent(
     ps = (row.get("posSide") or "").strip().lower()
     if ps not in ("long", "short"):
         return
-    bet = acc.bet_amount_per_position
-    if bet is None or bet <= 0:
-        return
-    principal_s = format(bet, "f").rstrip("0").rstrip(".")
-    if not principal_s:
-        return
+    principal_s = ""
+    principal_ratio_s: str | None = None
+    if bool(acc.open_by_asset_ratio):
+        src_eq = source_equity_usdt if source_equity_usdt is not None else Decimal(0)
+        src_notional = _row_notional_usd(row)
+        if src_eq <= 0 or src_notional <= 0:
+            return
+        principal_ratio_s = format(src_notional / src_eq, "f")
+    else:
+        bet = acc.bet_amount_per_position
+        if bet is None or bet <= 0:
+            return
+        principal_s = format(bet, "f").rstrip("0").rstrip(".")
+        if not principal_s:
+            return
     lev_s = str(row.get("lever") or "").strip()
     oid = acc.okx_api_account_id
     if oid is None:
@@ -214,6 +244,7 @@ def _append_live_follow_open_intent(
             pos_side=ps,
             lever_str=lev_s if lev_s else None,
             principal_usdt=principal_s,
+            principal_ratio_of_my_equity=principal_ratio_s,
         )
     )
 
@@ -376,8 +407,11 @@ def _reconcile_sim_follow_set(
     eligible: set[str],
     close_intents: list[LiveFollowCloseIntent],
     open_intents: list[LiveFollowOpenIntent],
+    adjust_intents: list[LiveFollowAdjustIntent],
     *,
     skip_open_pids: frozenset[str] = frozenset(),
+    old_map: dict[str, dict[str, Any]],
+    source_equity_usdt: Decimal | None,
 ) -> None:
     """仓位仍在对方快照中但掉出「可跟 n」时结算模拟；新进 n 且无模拟行时补开模拟。
 
@@ -401,6 +435,61 @@ def _reconcile_sim_follow_set(
             continue
         if pid not in eligible:
             _close_sim_at_exit(db, acc, pid, new_map[pid], None, close_intents)
+            continue
+        if not bool(acc.open_by_asset_ratio):
+            continue
+        old_row = old_map.get(pid)
+        new_row = new_map.get(pid)
+        if not isinstance(old_row, dict) or not isinstance(new_row, dict):
+            continue
+        old_notional = _row_notional_usd(old_row)
+        new_notional = _row_notional_usd(new_row)
+        if old_notional <= 0 or new_notional <= 0 or old_notional == new_notional:
+            continue
+        inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
+        ps = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
+        if not inst_id or ps not in ("long", "short") or acc.okx_api_account_id is None:
+            continue
+        lever_s = str(new_row.get("lever", "")).strip() or None
+        if new_notional > old_notional:
+            src_eq = source_equity_usdt if source_equity_usdt is not None else Decimal(0)
+            if src_eq <= 0:
+                continue
+            ratio = (new_notional - old_notional) / src_eq
+            if ratio <= 0:
+                continue
+            adjust_intents.append(
+                LiveFollowAdjustIntent(
+                    follow_account_id=acc.id,
+                    okx_api_account_id=acc.okx_api_account_id,
+                    sim_record_id=rec.id,
+                    inst_id=inst_id,
+                    pos_side=ps,
+                    lever_str=lever_s,
+                    action="add",
+                    add_ratio_of_my_equity=format(ratio, "f"),
+                    reduce_ratio_of_my_notional=None,
+                )
+            )
+            rec.add_position_count = int(rec.add_position_count or 0) + 1
+        else:
+            ratio = (old_notional - new_notional) / old_notional
+            if ratio <= 0:
+                continue
+            adjust_intents.append(
+                LiveFollowAdjustIntent(
+                    follow_account_id=acc.id,
+                    okx_api_account_id=acc.okx_api_account_id,
+                    sim_record_id=rec.id,
+                    inst_id=inst_id,
+                    pos_side=ps,
+                    lever_str=lever_s,
+                    action="reduce",
+                    add_ratio_of_my_equity=None,
+                    reduce_ratio_of_my_notional=format(ratio, "f"),
+                )
+            )
+            rec.reduce_position_count = int(rec.reduce_position_count or 0) + 1
 
     for pid in eligible:
         if pid not in new_map:
@@ -413,7 +502,12 @@ def _reconcile_sim_follow_set(
             sid = _create_sim_open(db, acc, new_map[pid], pid, open_ev=None)
             if sid is not None:
                 _append_live_follow_open_intent(
-                    acc, sid, new_map[pid], pid, open_intents
+                    acc,
+                    sid,
+                    new_map[pid],
+                    pid,
+                    open_intents,
+                    source_equity_usdt=source_equity_usdt,
                 )
 
 
@@ -457,6 +551,8 @@ def _apply_snapshot_and_events(
     *,
     close_intents: list[LiveFollowCloseIntent],
     open_intents: list[LiveFollowOpenIntent],
+    adjust_intents: list[LiveFollowAdjustIntent],
+    source_equity_usdt: Decimal | None,
 ) -> None:
     unique_rows = _unique_positions_by_pos_id(positions)
     new_map = {str(p["posId"]): _norm_row(p) for p in unique_rows if p.get("posId") is not None}
@@ -495,7 +591,14 @@ def _apply_snapshot_and_events(
                 sid = _create_sim_open(db, acc, row, pid, open_ev=ev)
                 if sid is not None:
                     open_branch_handled_pids.add(pid)
-                    _append_live_follow_open_intent(acc, sid, row, pid, open_intents)
+                    _append_live_follow_open_intent(
+                        acc,
+                        sid,
+                        row,
+                        pid,
+                        open_intents,
+                        source_equity_usdt=source_equity_usdt,
+                    )
 
     for pid, old_row in old_map.items():
         if pid not in new_map:
@@ -536,7 +639,10 @@ def _apply_snapshot_and_events(
         eligible,
         close_intents,
         open_intents,
+        adjust_intents,
         skip_open_pids=frozenset(open_branch_handled_pids),
+        old_map=old_map,
+        source_equity_usdt=source_equity_usdt,
     )
     _refresh_sim_unrealized(db, acc.id, new_map)
     db.commit()
@@ -565,22 +671,35 @@ def _sync_fetch_enabled_accounts() -> list[tuple[int, str]]:
 
 
 def _sync_apply_positions(
-    aid: int, positions: list[dict[str, Any]]
-) -> tuple[list[LiveFollowCloseIntent], list[LiveFollowOpenIntent]]:
+    aid: int,
+    positions: list[dict[str, Any]],
+    source_equity_usdt_s: str | None,
+) -> tuple[list[LiveFollowCloseIntent], list[LiveFollowOpenIntent], list[LiveFollowAdjustIntent]]:
     close_intents: list[LiveFollowCloseIntent] = []
     open_intents: list[LiveFollowOpenIntent] = []
+    adjust_intents: list[LiveFollowAdjustIntent] = []
     db = SessionLocal()
     try:
         acc = db.get(FollowAccount, aid)
         if not acc or not acc.enabled or not acc.unique_name:
-            return ([], [])
+            return ([], [], [])
+        src_eq = _to_dec(source_equity_usdt_s)
+        if src_eq <= 0:
+            src_eq = None
         _apply_snapshot_and_events(
-            db, acc, positions, close_intents=close_intents, open_intents=open_intents
+            db,
+            acc,
+            positions,
+            close_intents=close_intents,
+            open_intents=open_intents,
+            adjust_intents=adjust_intents,
+            source_equity_usdt=src_eq,
         )
-        return (close_intents, open_intents)
+        return (close_intents, open_intents, adjust_intents)
     except Exception:
         close_intents.clear()
         open_intents.clear()
+        adjust_intents.clear()
         raise
     finally:
         db.close()
@@ -600,8 +719,15 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
             raw = await OkxTrade.get_position_current(unique_name)
             if not isinstance(raw, list):
                 raw = []
-            closes, opens = await asyncio.to_thread(_sync_apply_positions, account_id, raw)
-            await run_live_follow_intents(closes, opens)
+            overview = await OkxTrade.get_overview_data(unique_name)
+            src_eq = None if not isinstance(overview, dict) else overview.get("equity")
+            closes, opens, adjusts = await asyncio.to_thread(
+                _sync_apply_positions,
+                account_id,
+                raw,
+                None if src_eq is None else str(src_eq),
+            )
+            await run_live_follow_intents(closes, opens, adjusts)
         except asyncio.CancelledError:
             raise
         except Exception as e:

@@ -376,6 +376,12 @@ class OkxFollowOrderClient:
         path = f"/api/v5/account/positions?instType={inst_type}"
         return await self._get(path)
 
+    async def get_account_balance(self, ccy: str = "USDT") -> tuple[bool, Any]:
+        """GET /api/v5/account/balance"""
+        q = urlencode({"ccy": ccy.strip().upper()}) if ccy else ""
+        path = "/api/v5/account/balance" + (f"?{q}" if q else "")
+        return await self._get(path)
+
     async def get_account_config(self) -> tuple[bool, Any]:
         """GET /api/v5/account/config（含 acctLv、posMode 等）。"""
         return await self._get("/api/v5/account/config")

@@ -471,6 +471,20 @@ async def linked_okx_positions(
     return data  # type: ignore[return-value]
 
 
+@router.get("/linked-okx/account-balance")
+async def linked_okx_account_balance(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    ccy: str = Query("USDT", description="币种，默认 USDT"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """本人资产余额（欧易 GET /api/v5/account/balance）。"""
+    client = _require_linked_okx_client(db, unique_name)
+    ok, data = await client.get_account_balance(ccy=ccy)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
+    return data  # type: ignore[return-value]
+
+
 @router.get("/position-pnl-summary", response_model=PositionPnlSummaryOut)
 def get_position_pnl_summary(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),

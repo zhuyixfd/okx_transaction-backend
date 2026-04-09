@@ -706,7 +706,7 @@ def _sync_apply_positions(
 
 
 # 每帐户独立协程内的轮询间隔（秒）；各帐户互不影响。
-_ACCOUNT_POLL_INTERVAL_SEC = 0.5
+_ACCOUNT_POLL_INTERVAL_SEC = 0.8
 
 
 async def _account_position_loop(account_id: int, unique_name: str) -> None:

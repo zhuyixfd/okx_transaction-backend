@@ -363,6 +363,19 @@ def _row_pick_ms(row: dict, keys: list[str]) -> int | None:
     return None
 
 
+def _base_ccy_from_inst_like(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().upper()
+    if not s:
+        return None
+    parts = s.split("-")
+    if not parts:
+        return None
+    base = parts[0].strip()
+    return base or None
+
+
 @router.get("/position-history-events", response_model=PositionEventPageOut)
 async def list_position_history_events(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
@@ -389,7 +402,10 @@ async def list_position_history_events(
         created_at = datetime.fromtimestamp(ms / 1000, tz=now_dt.tzinfo) if ms else now_dt
 
         pos_id = _row_pick_str(row, ["posId", "positionId", "id"])
-        pos_ccy = _row_pick_str(row, ["posCcy", "ccy", "baseCcy", "base"])
+        pos_ccy = (
+            _row_pick_str(row, ["posCcy", "ccy", "baseCcy", "base"])
+            or _base_ccy_from_inst_like(_row_pick_str(row, ["instId", "instFamily", "uly"]))
+        )
         pos_side = _row_pick_str(row, ["posSide", "side", "direction"])
         lever = _row_pick_str(row, ["lever", "leverage", "posLever"])
         avg_px = _row_pick_str(row, ["avgPx", "openAvgPx", "openPx"])

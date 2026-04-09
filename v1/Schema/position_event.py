@@ -28,6 +28,9 @@ class PositionEventOut(BaseModel):
         description="从 detail_json 解析的 upl（USDT）；未平仓行可由前端用快照覆盖为实时",
     )
     pos: Optional[str] = Field(None, description="持仓量，来自 detail_json.pos")
+    notional_usd: Optional[str] = Field(None, description="持仓价值（USDT）")
+    notional_ccy: Optional[str] = Field(None, description="持仓价值（币本位）")
+    notional: Optional[str] = Field(None, description="持仓价值（接口原字段）")
     margin: Optional[str] = Field(None, description="保证金")
     mgn_ratio: Optional[str] = Field(None, description="维持保证金率")
     liq_px: Optional[str] = Field(None, description="预估强平价")

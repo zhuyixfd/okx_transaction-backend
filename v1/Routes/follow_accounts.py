@@ -590,6 +590,26 @@ async def linked_okx_account_balance(
     return data  # type: ignore[return-value]
 
 
+@router.get("/linked-okx/positions-history")
+async def linked_okx_positions_history(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    inst_type: str = Query("SWAP"),
+    mgn_mode: str | None = Query(None, description="保证金模式，可选：cross/isolated"),
+    limit: int = Query(100, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    """本人历史持仓（欧易 GET /api/v5/account/positions-history）。"""
+    client = _require_linked_okx_client(db, unique_name)
+    ok, data = await client.get_positions_history(
+        inst_type=inst_type,
+        mgn_mode=mgn_mode,
+        limit=limit,
+    )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
+    return data  # type: ignore[return-value]
+
+
 @router.get("/position-pnl-summary", response_model=PositionPnlSummaryOut)
 def get_position_pnl_summary(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),

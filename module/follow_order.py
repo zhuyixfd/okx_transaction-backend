@@ -382,6 +382,22 @@ class OkxFollowOrderClient:
         path = "/api/v5/account/balance" + (f"?{q}" if q else "")
         return await self._get(path)
 
+    async def get_positions_history(
+        self,
+        inst_type: str = "SWAP",
+        mgn_mode: str | None = None,
+        limit: int = 100,
+    ) -> tuple[bool, Any]:
+        """GET /api/v5/account/positions-history"""
+        q: dict[str, str] = {
+            "instType": inst_type.strip().upper(),
+            "limit": str(max(1, min(limit, 100))),
+        }
+        if mgn_mode and str(mgn_mode).strip():
+            q["mgnMode"] = str(mgn_mode).strip().lower()
+        path = "/api/v5/account/positions-history?" + urlencode(q)
+        return await self._get(path)
+
     async def get_account_config(self) -> tuple[bool, Any]:
         """GET /api/v5/account/config（含 acctLv、posMode 等）。"""
         return await self._get("/api/v5/account/config")

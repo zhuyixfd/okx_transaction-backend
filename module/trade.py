@@ -62,6 +62,9 @@ class OkxTrade:
     query_position_current: str = (
         "https://www.oyigwcn.biz/priapi/v5/ecotrade/public/community/user/position-current"
     )
+    query_position_history: str = (
+        "https://www.oyigwcn.biz/priapi/v5/ecotrade/public/community/user/position-history"
+    )
     _session: aiohttp.ClientSession | None = None
     overview_page_tpl: str = "https://www.oyigwcn.biz/zh-hans/copy-trading/account/{unique_name}?tab=trade"
 
@@ -119,6 +122,25 @@ class OkxTrade:
         ) as response:
             data = await response.json()
             return await cls.clean_position_current(data)
+
+    @classmethod
+    async def get_position_history(cls, unique_name: str, limit: int = 100, offset: int = 0):
+        """
+        获取社区历史仓位（平仓记录）。
+        说明：该接口返回结构在不同环境可能有差异，这里做宽松解析并统一输出列表。
+        """
+        session = cls.get_session()
+        async with session.get(
+            url=cls.query_position_history,
+            params={
+                "uniqueName": unique_name.strip(),
+                "limit": int(limit),
+                "offset": int(offset),
+                "t": int(time.time() * 1000),
+            },
+        ) as response:
+            data = await response.json()
+            return cls.clean_position_history(data)
 
     @classmethod
     async def get_overview_data(cls, unique_name: str) -> dict:
@@ -210,6 +232,23 @@ class OkxTrade:
                 "notional": pos.get("notional", ""),
             })
         return res
+
+    @staticmethod
+    def clean_position_history(data: dict) -> list[dict]:
+        if not isinstance(data, dict):
+            return []
+        raw = data.get("data")
+        rows: list[dict] = []
+        if isinstance(raw, list):
+            rows = [r for r in raw if isinstance(r, dict)]
+        elif isinstance(raw, dict):
+            for key in ("items", "list", "history", "positionList", "data"):
+                v = raw.get(key)
+                if isinstance(v, list):
+                    rows = [r for r in v if isinstance(r, dict)]
+                    if rows:
+                        break
+        return rows
 
     @classmethod
     async def close(cls) -> None:

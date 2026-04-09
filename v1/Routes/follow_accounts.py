@@ -338,6 +338,108 @@ def _event_to_out(r: FollowPositionEvent) -> PositionEventOut:
     )
 
 
+def _row_pick_str(row: dict, keys: list[str]) -> str | None:
+    for k in keys:
+        v = row.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s:
+            return s
+    return None
+
+
+def _row_pick_ms(row: dict, keys: list[str]) -> int | None:
+    for k in keys:
+        v = row.get(k)
+        if v is None:
+            continue
+        try:
+            n = int(str(v).strip())
+            if n > 0:
+                return n
+        except Exception:
+            continue
+    return None
+
+
+@router.get("/position-history-events", response_model=PositionEventPageOut)
+async def list_position_history_events(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+) -> PositionEventPageOut:
+    """
+    从社区历史仓位接口读取记录，并映射为前端跟单记录使用的事件结构。
+    """
+    ensure_mysql_db_configured()
+    un = unique_name.strip()
+    acc = db.execute(select(FollowAccount).where(FollowAccount.unique_name == un)).scalar_one_or_none()
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    rows = await OkxTrade.get_position_history(un, limit=limit, offset=offset)
+    items: list[PositionEventOut] = []
+    now_dt = now_cn()
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        ms = _row_pick_ms(row, ["uTime", "cTime", "closeTime", "ts"])
+        created_at = datetime.fromtimestamp(ms / 1000, tz=now_dt.tzinfo) if ms else now_dt
+
+        pos_id = _row_pick_str(row, ["posId", "positionId", "id"])
+        pos_ccy = _row_pick_str(row, ["posCcy", "ccy", "baseCcy", "base"])
+        pos_side = _row_pick_str(row, ["posSide", "side", "direction"])
+        lever = _row_pick_str(row, ["lever", "leverage", "posLever"])
+        avg_px = _row_pick_str(row, ["avgPx", "openAvgPx", "openPx"])
+        last_px = _row_pick_str(row, ["closeAvgPx", "closePx", "last", "markPx"])
+        upl_ratio = _row_pick_str(row, ["uplRatio", "pnlRatio"])
+        upl = _row_pick_str(row, ["upl", "realizedPnl", "pnl"])
+        pos = _row_pick_str(row, ["pos", "closeSz", "sz"])
+        notional_usd = _row_pick_str(
+            row,
+            ["notionalUsd", "notional_usd", "closeNotionalUsd", "closeNotional", "notional"],
+        )
+        notional_ccy = _row_pick_str(row, ["notionalCcy", "notional_ccy"])
+        notional = _row_pick_str(row, ["notional", "closeNotional"])
+        margin = _row_pick_str(row, ["margin", "imr"])
+        mgn_ratio = _row_pick_str(row, ["mgnRatio"])
+        liq_px = _row_pick_str(row, ["liqPx"])
+        c_time = _row_pick_str(row, ["cTime", "closeTime", "uTime", "ts"])
+        detail_json = json.dumps(row, ensure_ascii=False)
+
+        items.append(
+            PositionEventOut(
+                id=-(offset + i + 1),
+                follow_account_id=acc.id,
+                unique_name=un,
+                event_type="close",
+                pos_id=pos_id,
+                pos_ccy=pos_ccy,
+                pos_side=pos_side,
+                lever=lever,
+                avg_px=avg_px,
+                last_px=last_px,
+                upl_ratio=upl_ratio,
+                upl=upl,
+                pos=pos,
+                notional_usd=notional_usd,
+                notional_ccy=notional_ccy,
+                notional=notional,
+                margin=margin,
+                mgn_ratio=mgn_ratio,
+                liq_px=liq_px,
+                c_time=c_time,
+                detail_json=detail_json,
+                created_at=created_at,
+            )
+        )
+
+    total = offset + len(items)
+    return PositionEventPageOut(items=items, total=total)
+
+
 @router.get("/position-events", response_model=PositionEventPageOut)
 def list_position_events(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),

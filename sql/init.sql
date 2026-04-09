@@ -56,6 +56,7 @@ CREATE TABLE `follow_accounts` (
   `stop_loss_ratio` DECIMAL(12,6) NULL DEFAULT NULL COMMENT '止损收益率阈值（比例，0.1=10%）',
   `okx_api_account_id` INT NULL DEFAULT NULL,
   `live_trading_enabled` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=真实交易私有接口；0=仅模拟',
+  `open_by_asset_ratio` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=按资产比例开仓；0=按固定下注金额',
   PRIMARY KEY (`id`),
   UNIQUE KEY `ix_follow_accounts_link` (`link`),
   UNIQUE KEY `uq_follow_accounts_okx_api` (`okx_api_account_id`),

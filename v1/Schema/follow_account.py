@@ -46,6 +46,10 @@ class FollowConfigPatch(BaseModel):
         None,
         description="True=真实交易（调欧易私有接口）；False=仅模拟，不实际下单/追加",
     )
+    open_by_asset_ratio: Optional[bool] = Field(
+        None,
+        description="True=按资产比例开仓；False=按固定下注金额开仓",
+    )
     maint_margin_ratio_threshold: Optional[Decimal] = Field(
         None, ge=0, description="维持保证金率阈值（比例值，2=200%）"
     )
@@ -86,6 +90,10 @@ class FollowAccountOut(BaseModel):
     live_trading_enabled: bool = Field(
         False,
         description="是否启用真实交易（否则为模拟，不调欧易私有交易接口）",
+    )
+    open_by_asset_ratio: bool = Field(
+        False,
+        description="是否按资产比例开仓（否则按固定下注金额）",
     )
     maint_margin_ratio_threshold: Optional[Decimal] = Field(
         None, description="维持保证金率阈值（比例值，2=200%）"

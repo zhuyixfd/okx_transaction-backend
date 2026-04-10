@@ -194,6 +194,13 @@ def _should_emit_live_open(acc: FollowAccount) -> bool:
         return False
     if acc.okx_api_account_id is None:
         return False
+    if bool(acc.open_by_asset_ratio):
+        coeff = (
+            Decimal(str(acc.open_by_asset_ratio_coeff))
+            if acc.open_by_asset_ratio_coeff is not None
+            else Decimal("1")
+        )
+        return coeff > 0
     bet = acc.bet_amount_per_position
     return bet is not None and bet > 0
 
@@ -220,9 +227,14 @@ def _append_live_follow_open_intent(
     if bool(acc.open_by_asset_ratio):
         src_eq = source_equity_usdt if source_equity_usdt is not None else Decimal(0)
         src_notional = _row_notional_usd(row)
-        if src_eq <= 0 or src_notional <= 0:
+        coeff = (
+            Decimal(str(acc.open_by_asset_ratio_coeff))
+            if acc.open_by_asset_ratio_coeff is not None
+            else Decimal("1")
+        )
+        if src_eq <= 0 or src_notional <= 0 or coeff <= 0:
             return
-        principal_ratio_s = format(src_notional / src_eq, "f")
+        principal_ratio_s = format((src_notional / src_eq) * coeff, "f")
     else:
         bet = acc.bet_amount_per_position
         if bet is None or bet <= 0:
@@ -453,9 +465,14 @@ def _reconcile_sim_follow_set(
         lever_s = str(new_row.get("lever", "")).strip() or None
         if new_notional > old_notional:
             src_eq = source_equity_usdt if source_equity_usdt is not None else Decimal(0)
+            coeff = (
+                Decimal(str(acc.open_by_asset_ratio_coeff))
+                if acc.open_by_asset_ratio_coeff is not None
+                else Decimal("1")
+            )
             if src_eq <= 0:
                 continue
-            ratio = (new_notional - old_notional) / src_eq
+            ratio = ((new_notional - old_notional) / src_eq) * coeff
             if ratio <= 0:
                 continue
             adjust_intents.append(

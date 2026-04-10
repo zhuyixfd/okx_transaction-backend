@@ -164,6 +164,9 @@ def _to_out(
         okx_api_account_id=row.okx_api_account_id,
         live_trading_enabled=bool(row.live_trading_enabled),
         open_by_asset_ratio=bool(row.open_by_asset_ratio),
+        open_by_asset_ratio_coeff=row.open_by_asset_ratio_coeff
+        if row.open_by_asset_ratio_coeff is not None
+        else Decimal("1"),
         maint_margin_ratio_threshold=row.maint_margin_ratio_threshold,
         close_margin_ratio_threshold=row.close_margin_ratio_threshold,
         take_profit_ratio=row.take_profit_ratio,

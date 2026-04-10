@@ -59,3 +59,7 @@ class FollowAccount(Base):
     live_trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # 开仓模式：True=按资产比例开仓；False=按固定下注金额开仓。
     open_by_asset_ratio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 按资产比例开仓系数：最终比例 = 对方仓位资产占比 × 系数（默认 1）。
+    open_by_asset_ratio_coeff: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("1")
+    )

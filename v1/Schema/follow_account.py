@@ -50,6 +50,11 @@ class FollowConfigPatch(BaseModel):
         None,
         description="True=按资产比例开仓；False=按固定下注金额开仓",
     )
+    open_by_asset_ratio_coeff: Optional[Decimal] = Field(
+        None,
+        ge=0,
+        description="按资产比例开仓系数（最终比例=对方仓位资产占比×该系数）",
+    )
     maint_margin_ratio_threshold: Optional[Decimal] = Field(
         None, ge=0, description="维持保证金率阈值（比例值，2=200%）"
     )
@@ -94,6 +99,10 @@ class FollowAccountOut(BaseModel):
     open_by_asset_ratio: bool = Field(
         False,
         description="是否按资产比例开仓（否则按固定下注金额）",
+    )
+    open_by_asset_ratio_coeff: Decimal = Field(
+        default=Decimal("1"),
+        description="按资产比例开仓系数（默认 1）",
     )
     maint_margin_ratio_threshold: Optional[Decimal] = Field(
         None, description="维持保证金率阈值（比例值，2=200%）"

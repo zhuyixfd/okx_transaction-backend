@@ -842,8 +842,6 @@ async def post_position_action(
     rec = db.get(FollowSimRecord, body.sim_record_id)
     if rec is None or rec.follow_account_id != acc.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
-    if rec.status != "open" and body.action != "add":
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该仓位已平仓")
     rec_pos_side = (rec.pos_side or "").strip().lower()
     if rec_pos_side not in ("long", "short"):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="无效持仓方向")

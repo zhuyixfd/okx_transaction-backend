@@ -49,7 +49,9 @@ router = APIRouter(prefix="/follow-accounts", tags=["follow-accounts"])
 
 class PositionActionBody(BaseModel):
     unique_name: str = Field(..., min_length=1, max_length=128)
-    sim_record_id: int = Field(..., ge=1)
+    sim_record_id: int | None = Field(None, ge=1)
+    pos_ccy: str | None = Field(None, min_length=1, max_length=32)
+    pos_side: str | None = Field(None, pattern="^(long|short)$")
     action: str = Field(..., pattern="^(add|reduce|close|reverse)$")
 
 
@@ -839,17 +841,33 @@ async def post_position_action(
     if bet <= 0:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额需大于 0")
 
-    rec = db.get(FollowSimRecord, body.sim_record_id)
-    if rec is None or rec.follow_account_id != acc.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
-    rec_pos_side = (rec.pos_side or "").strip().lower()
+    rec: FollowSimRecord | None = None
+    if body.sim_record_id is not None:
+        rec = db.get(FollowSimRecord, body.sim_record_id)
+        if rec is None or rec.follow_account_id != acc.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
+    elif body.pos_ccy:
+        rec = (
+            db.execute(
+                select(FollowSimRecord)
+                .where(
+                    FollowSimRecord.follow_account_id == acc.id,
+                    FollowSimRecord.pos_ccy == body.pos_ccy.strip().upper(),
+                )
+                .order_by(FollowSimRecord.id.desc())
+                .limit(1)
+            )
+            .scalar_one_or_none()
+        )
+    rec_pos_side = (rec.pos_side if rec else (body.pos_side or "")).strip().lower()
     if rec_pos_side not in ("long", "short"):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="无效持仓方向")
-    if not rec.pos_ccy:
+    rec_pos_ccy = (rec.pos_ccy if rec else (body.pos_ccy or "")).strip().upper()
+    if not rec_pos_ccy:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="缺少币种信息")
 
     client = require_okx_client(db, acc.okx_api_account_id)
-    inst_id = normalize_swap_inst_id(rec.pos_ccy)
+    inst_id = normalize_swap_inst_id(rec_pos_ccy)
 
     ok_cfg, cfg_data = await client.get_account_config()
     _, cfg_pos_mode = (
@@ -938,7 +956,7 @@ async def post_position_action(
                 }
             )
         print(
-            f"[position_action] no target follow_id={acc.id} sim_id={rec.id} "
+            f"[position_action] no target follow_id={acc.id} sim_id={getattr(rec, 'id', None)} "
             f"base={base_ccy} prefer_side={rec_pos_side} rows={same_base_rows!r}"
         )
         if body.action != "add":
@@ -1063,6 +1081,26 @@ async def post_position_action(
         rec.closed_at = now_cn()
 
     action_rec = rec
+    if action_rec is None:
+        now = now_cn()
+        action_rec = FollowSimRecord(
+            follow_account_id=acc.id,
+            pos_id=(str(target_row.get("posId", "")).strip() if isinstance(target_row, dict) else "") or f"manual-{rec_pos_ccy}-{int(now.timestamp())}",
+            pos_ccy=rec_pos_ccy,
+            pos_side=rec_pos_side,
+            entry_avg_px=(str(target_row.get("avgPx", "")).strip() if isinstance(target_row, dict) else None) or None,
+            stake_usdt=Decimal(principal_s),
+            status="open",
+            unrealized_pnl_usdt=Decimal(0),
+            total_invested_usdt=Decimal(principal_s),
+            add_position_count=0,
+            reduce_position_count=0,
+            add_margin_count=0,
+            opened_at=now,
+            updated_at=now,
+        )
+        db.add(action_rec)
+        db.flush()
     if body.action == "add":
         ok_act, payload = await _place_open_with_side(pos_side)
         if not ok_act:

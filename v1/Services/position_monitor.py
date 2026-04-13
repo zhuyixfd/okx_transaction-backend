@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from decimal import Decimal
 from typing import Any
 
@@ -23,6 +24,11 @@ from v1.Services.live_follow_trade import (
     run_live_follow_intents,
 )
 from v1.Services.okx_contract_helpers import normalize_swap_inst_id
+
+
+def _log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    print(f"[{ts}] [position_monitor] {msg}")
 
 
 def _c_time_key(p: dict[str, Any]) -> tuple[int, str]:
@@ -712,11 +718,15 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
                 raw,
                 None if src_eq is None else str(src_eq),
             )
+            _log(
+                f"tick follow_id={account_id} unique_name={unique_name!r} "
+                f"positions={len(raw)} close={len(closes)} open={len(opens)} adjust={len(adjusts)}"
+            )
             await run_live_follow_intents(closes, opens, adjusts)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[position_monitor] API {unique_name!r}: {e!r}")
+            _log(f"api error unique_name={unique_name!r}: {e!r}")
         await asyncio.sleep(_ACCOUNT_POLL_INTERVAL_SEC)
 
 
@@ -760,9 +770,10 @@ async def position_monitor_loop() -> None:
                     tasks[aid] = asyncio.create_task(_account_position_loop(aid, un))
                     un_by_aid[aid] = un
 
+            _log(f"supervisor tick active_tasks={len(tasks)} enabled_accounts={len(want)}")
             await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[position_monitor] loop: {e!r}")
+            _log(f"supervisor error: {e!r}")
             await asyncio.sleep(2)

@@ -41,6 +41,12 @@ from v1.Models.follow_sim_record import FollowSimRecord
 from v1.Models.okx_api_account import OkxApiAccount
 from v1.Services.okx_contract_helpers import parse_account_config_fields
 
+
+def _log(msg: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    print(f"[{ts}] [margin_monitor] {msg}")
+
+
 _last_add_ts: dict[tuple[int, str, str], float] = {}
 """冷却键：(okx_api_accounts.id, instId, posSide)。"""
 _last_close_ts: dict[tuple[int, str, str], float] = {}
@@ -238,7 +244,7 @@ async def _poll_positions_and_maybe_add_margin(
     sl_ratio_f = _parse_ratio_value(stop_loss_ratio)
     ok, data = await get_positions_inst("SWAP", client=client)
     if not ok:
-        print(f"[margin_monitor] get_positions follow_id={acc_id} okx_id={okx_cred_id}: {data!r}")
+        _log(f"get_positions fail follow_id={acc_id} okx_id={okx_cred_id}: {data!r}")
         return
     ok_cfg, cfg_data = await client.get_account_config()
     _, cfg_pos_mode = (
@@ -269,10 +275,7 @@ async def _poll_positions_and_maybe_add_margin(
         if mgn is None:
             mr = p.get("mgnRatio")
             if mr is not None and str(mr).strip() != "":
-                print(
-                    f"[margin_monitor] skip unparseable mgnRatio follow_id={acc_id} "
-                    f"{inst_id!r} raw={mr!r}"
-                )
+                _log(f"skip unparseable mgnRatio follow_id={acc_id} {inst_id!r} raw={mr!r}")
             continue
         upl_ratio = _parse_ratio_value(p.get("uplRatio"))
 
@@ -298,14 +301,14 @@ async def _poll_positions_and_maybe_add_margin(
                 if ok_close:
                     _last_close_ts[close_key] = time.time()
                     _margin_add_counts.pop((acc_id, inst_id.lower(), api_pos_side), None)
-                    print(
-                        f"[margin_monitor] close ok follow_id={acc_id} okx_id={okx_cred_id} "
+                    _log(
+                        f"close ok follow_id={acc_id} okx_id={okx_cred_id} "
                         f"{inst_id} posSide={close_side or 'net'} reason={'+'.join(close_reasons)} "
                         f"mgnRatio~={mgn} uplRatio~={upl_ratio}"
                     )
                 else:
-                    print(
-                        f"[margin_monitor] close fail follow_id={acc_id} {inst_id} "
+                    _log(
+                        f"close fail follow_id={acc_id} {inst_id} "
                         f"posSide={close_side or 'net'} reason={'+'.join(close_reasons)}: {close_res!r}"
                     )
             await asyncio.sleep(0.35)
@@ -337,16 +340,13 @@ async def _poll_positions_and_maybe_add_margin(
                 _last_add_ts[cooldown_key] = time.time()
                 _margin_add_counts[count_key] = _margin_add_counts.get(count_key, 0) + 1
                 await asyncio.to_thread(_sync_bump_add_margin_count, acc_id, inst_id, pos_side_raw, amt_str)
-                print(
-                    f"[margin_monitor] add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
+                _log(
+                    f"add margin ok follow_id={acc_id} okx_id={okx_cred_id} "
                     f"{inst_id} {api_pos_side} amt={amt_str} mgnRatio~={mgn} "
                     f"count={_margin_add_counts[count_key]} cooldown>={COOLDOWN_SEC}s"
                 )
             else:
-                print(
-                    f"[margin_monitor] add margin fail follow_id={acc_id} {inst_id} "
-                    f"posSide={api_pos_side}: {res!r}"
-                )
+                _log(f"add margin fail follow_id={acc_id} {inst_id} posSide={api_pos_side}: {res!r}")
         await asyncio.sleep(0.35)
 
 
@@ -377,10 +377,14 @@ async def _account_margin_loop(follow_account_id: int) -> None:
                 stop_loss_ratio=ctx["stop_loss_ratio"],
                 client=client,
             )
+            _log(
+                f"tick follow_id={follow_account_id} okx_id={ctx['okx_cred_id']} "
+                f"single_add_margin={ctx['single_add_margin_usdt']}"
+            )
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[margin_monitor] follow_id={follow_account_id}: {e!r}")
+            _log(f"account loop error follow_id={follow_account_id}: {e!r}")
         await asyncio.sleep(_ACCOUNT_MARGIN_INTERVAL_SEC)
 
 
@@ -419,9 +423,10 @@ async def margin_monitor_loop() -> None:
                 if aid not in tasks:
                     tasks[aid] = asyncio.create_task(_account_margin_loop(aid))
 
+            _log(f"supervisor tick active_tasks={len(tasks)} target_accounts={len(want_ids)}")
             await asyncio.sleep(_SUPERVISOR_INTERVAL_SEC)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            print(f"[margin_monitor] supervisor: {e!r}")
+            _log(f"supervisor error: {e!r}")
             await asyncio.sleep(2)

@@ -1269,6 +1269,121 @@ async def snapshot_follow_once(
     return {"ok": True, "sim_record_id": rec.id}
 
 
+@router.post("/snapshot-follow-stop")
+async def snapshot_follow_stop_once(
+    body: SnapshotFollowBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    """按「对方持仓」单条记录关闭跟单：若在跟则平模拟；若未在跟则写关闭标记，阻止同一源仓位自动重开。"""
+    ensure_mysql_db_configured()
+    un = body.unique_name.strip()
+    pid = body.pos_id.strip()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    snap = db.get(FollowPositionSnapshot, acc.id)
+    if snap is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到对方持仓快照")
+    try:
+        snap_map = json.loads(snap.snapshot_json)
+    except Exception:
+        snap_map = {}
+    row = snap_map.get(pid) if isinstance(snap_map, dict) else None
+    if not isinstance(row, dict):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到对应持仓")
+
+    latest = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(
+                FollowSimRecord.follow_account_id == acc.id,
+                FollowSimRecord.pos_id == pid,
+            )
+            .order_by(FollowSimRecord.id.desc())
+            .limit(1)
+        )
+        .scalar_one_or_none()
+    )
+
+    exit_px = (
+        str(row.get("last", "")).strip()
+        or str(row.get("avgPx", "")).strip()
+        or (latest.entry_avg_px if latest else None)
+        or "0"
+    )
+    close_ev = FollowPositionEvent(
+        follow_account_id=acc.id,
+        unique_name=acc.unique_name or "",
+        event_type="close",
+        pos_id=pid,
+        pos_ccy=(str(row.get("posCcy", "")).strip() or (latest.pos_ccy if latest else None)),
+        pos_side=(str(row.get("posSide", "")).strip() or (latest.pos_side if latest else None)),
+        lever=(str(row.get("lever", "")).strip() or None),
+        avg_px=(str(row.get("avgPx", "")).strip() or (latest.entry_avg_px if latest else None)),
+        last_px=exit_px,
+        c_time=(str(row.get("cTime", "")).strip() or None),
+        detail_json=json.dumps(row, ensure_ascii=False),
+    )
+    db.add(close_ev)
+    db.flush()
+
+    if latest is not None and latest.status == "open":
+        latest.status = "closed"
+        latest.realized_pnl_usdt = _sim_pnl_usdt(
+            latest.stake_usdt,
+            latest.entry_avg_px,
+            exit_px,
+            latest.pos_side,
+        )
+        latest.unrealized_pnl_usdt = Decimal(0)
+        latest.exit_px = exit_px
+        latest.last_mark_px = exit_px
+        latest.close_event_id = close_ev.id
+        latest.closed_at = now_cn()
+        latest.updated_at = now_cn()
+        target_rec_id = latest.id
+    else:
+        now = now_cn()
+        marker = FollowSimRecord(
+            follow_account_id=acc.id,
+            pos_id=pid,
+            pos_ccy=(str(row.get("posCcy", "")).strip() or None),
+            pos_side=(str(row.get("posSide", "")).strip() or None),
+            entry_avg_px=(str(row.get("avgPx", "")).strip() or None),
+            stake_usdt=Decimal(0),
+            status="closed",
+            open_event_id=None,
+            close_event_id=close_ev.id,
+            exit_px=exit_px,
+            realized_pnl_usdt=Decimal(0),
+            unrealized_pnl_usdt=Decimal(0),
+            last_mark_px=exit_px,
+            src_pos=(str(row.get("pos", "")).strip() or None),
+            src_margin=(str(row.get("margin", "")).strip() or None),
+            src_mgn_ratio=(str(row.get("mgnRatio", "")).strip() or None),
+            src_liq_px=(str(row.get("liqPx", "")).strip() or None),
+            add_position_count=0,
+            reduce_position_count=0,
+            add_margin_count=0,
+            total_invested_usdt=Decimal(0),
+            live_open_ok=False,
+            live_close_ok=True,
+            opened_at=now,
+            closed_at=now,
+            updated_at=now,
+        )
+        db.add(marker)
+        db.flush()
+        target_rec_id = marker.id
+
+    db.commit()
+    return {"ok": True, "sim_record_id": target_rec_id}
+
+
 @router.patch("/{account_id}/okx-bind", response_model=FollowAccountOut)
 def patch_follow_okx_bind(
     account_id: int,

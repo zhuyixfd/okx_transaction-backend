@@ -1274,7 +1274,7 @@ async def snapshot_follow_stop_once(
     body: SnapshotFollowBody,
     db: Session = Depends(get_db),
 ) -> dict:
-    """按「对方持仓」单条记录关闭跟单：若在跟则平模拟；若未在跟则写关闭标记，阻止同一源仓位自动重开。"""
+    """按「对方持仓」单条记录关闭跟单：先尝试平掉本人对应仓位，再写关闭标记。"""
     ensure_mysql_db_configured()
     un = body.unique_name.strip()
     pid = body.pos_id.strip()
@@ -1295,6 +1295,44 @@ async def snapshot_follow_stop_once(
     row = snap_map.get(pid) if isinstance(snap_map, dict) else None
     if not isinstance(row, dict):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="未找到对应持仓")
+
+    ccy = str(row.get("posCcy", "")).strip().upper()
+    pos_side = str(row.get("posSide", "")).strip().lower()
+    if ccy and pos_side in ("long", "short") and acc.okx_api_account_id is not None:
+        client = require_okx_client(db, acc.okx_api_account_id)
+        ok_cfg, cfg_data = await client.get_account_config()
+        _, cfg_pos_mode = parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+        hedge_mode = cfg_pos_mode != "net_mode"
+        ok_pos, pos_payload = await client.get_positions_inst("SWAP")
+        if not ok_pos:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pos_payload)
+
+        inst_id = normalize_swap_inst_id(ccy)
+        target_row: dict | None = None
+        for p in (pos_payload.get("data") or []):
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("instId", "")).strip().upper() != inst_id:
+                continue
+            try:
+                pv = abs(float(str(p.get("pos", "")).strip() or "0"))
+            except ValueError:
+                pv = 0.0
+            if pv <= 1e-12:
+                continue
+            row_side = str(p.get("posSide", "")).strip().lower()
+            if hedge_mode and row_side != pos_side:
+                continue
+            target_row = p
+            break
+
+        if target_row is not None:
+            row_mgn_mode = str(target_row.get("mgnMode", "")).strip().lower()
+            td_mode = "cross" if row_mgn_mode == "cross" else "isolated"
+            api_pos_side = pos_side if hedge_mode else None
+            ok_close, payload_close = await client.close_swap_position(inst_id, td_mode, api_pos_side)
+            if not ok_close:
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload_close)
 
     latest = (
         db.execute(

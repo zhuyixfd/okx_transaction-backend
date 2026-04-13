@@ -1152,12 +1152,9 @@ async def snapshot_follow_once(
     if acc.okx_api_account_id is None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="未绑定 OKX API 帐户")
 
-    bet = Decimal(str(acc.bet_amount_per_position or 0))
-    if bet <= 0:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额需大于 0")
-    principal_s = format(bet, "f").rstrip("0").rstrip(".")
-    if not principal_s:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="下注金额无效")
+    coeff = Decimal(str(acc.open_by_asset_ratio_coeff or 0))
+    if coeff <= 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="持仓量系数需大于 0")
 
     snap = db.get(FollowPositionSnapshot, acc.id)
     if snap is None:
@@ -1217,10 +1214,19 @@ async def snapshot_follow_once(
     if lever_i is None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="无法确定杠杆，请稍后再试")
 
-    ok_open, payload_open = await client.place_swap_market_by_principal_usdt(
+    try:
+        src_pos_abs = abs(Decimal(str(row.get("pos") or "0").strip()))
+    except Exception:
+        src_pos_abs = Decimal(0)
+    if src_pos_abs <= 0:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="对方持仓张数无效")
+    contracts_s = format((src_pos_abs * coeff), "f").rstrip("0").rstrip(".")
+    if not contracts_s:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="按持仓量系数计算后张数无效")
+
+    ok_open, payload_open = await client.place_swap_market_by_sz(
         inst_id,
-        principal_s,
-        leverage=lever_i,
+        contracts_s,
         td_mode=td_mode,
         side="buy" if pos_side == "long" else "sell",
         pos_side=pos_side if hedge_mode else None,
@@ -1235,7 +1241,7 @@ async def snapshot_follow_once(
         pos_ccy=ccy,
         pos_side=pos_side,
         entry_avg_px=(str(row.get("avgPx", "")).strip() or None),
-        stake_usdt=Decimal(principal_s),
+        stake_usdt=Decimal(str(acc.bet_amount_per_position or 0)),
         status="open",
         open_event_id=None,
         close_event_id=None,
@@ -1250,7 +1256,7 @@ async def snapshot_follow_once(
         add_position_count=0,
         reduce_position_count=0,
         add_margin_count=0,
-        total_invested_usdt=Decimal(principal_s),
+        total_invested_usdt=Decimal(str(acc.bet_amount_per_position or 0)),
         live_open_ok=True,
         live_close_ok=None,
         opened_at=now,

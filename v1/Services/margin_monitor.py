@@ -8,11 +8,11 @@
 
 默认仅在未配置时回退到 mgnRatio ≤ 2（即 ≤200%，接口为比例）追加：
 
-    追加 USDT = bet_amount_per_position × margin_add_ratio_of_bet
+    追加 USDT = single_add_margin_usdt（存于 follow_accounts.bet_amount_per_position）
 
 与 position_monitor 相同：主管协程定期对齐 DB 中的目标列表，多帐户并发、互不争抢同一轮询周期。
 同一 OKX 密钥 + 同一合约 + 同一 posSide 在进程内用 asyncio.Lock 串行追加；两次成功追加最短间隔见 COOLDOWN_SEC（与轮询周期独立，由该常量单独控制）。
-条件：跟单启用、绑定 OKX、真实交易、启动追加、下注金额 > 0、密钥完整。可选 margin_add_max_times
+条件：跟单启用、绑定 OKX、真实交易、单次增加保证金 > 0、密钥完整。可选 margin_add_max_times
 与计数清零规则见下方全局变量说明。
 
 .env 可选 OKX_FOLLOW_REST_BASE、OKX_FOLLOW_USE_PAPER。
@@ -106,7 +106,6 @@ def _rows_live_margin_okx(db: Session) -> list[tuple[FollowAccount, OkxApiAccoun
     accs = (
         db.execute(
             select(FollowAccount).where(
-                FollowAccount.margin_auto_enabled == True,  # noqa: E712
                 FollowAccount.enabled == True,  # noqa: E712
                 FollowAccount.live_trading_enabled == True,  # noqa: E712
                 FollowAccount.okx_api_account_id.isnot(None),
@@ -151,7 +150,7 @@ def _sync_load_margin_poll_context(follow_account_id: int) -> dict[str, Any] | N
         acc = db.get(FollowAccount, follow_account_id)
         if acc is None:
             return None
-        if not acc.enabled or not acc.margin_auto_enabled or not acc.live_trading_enabled:
+        if not acc.enabled or not acc.live_trading_enabled:
             return None
         if acc.okx_api_account_id is None:
             return None
@@ -163,12 +162,7 @@ def _sync_load_margin_poll_context(follow_account_id: int) -> dict[str, Any] | N
         return {
             "acc_id": acc.id,
             "okx_cred_id": cred.id,
-            "bet": acc.bet_amount_per_position,
-            "add_ratio": (
-                acc.margin_add_ratio_of_bet
-                if acc.margin_add_ratio_of_bet is not None
-                else Decimal("0.2")
-            ),
+            "single_add_margin_usdt": acc.bet_amount_per_position,
             "max_times": acc.margin_add_max_times,
             "maint_margin_ratio_threshold": acc.maint_margin_ratio_threshold,
             "close_margin_ratio_threshold": acc.close_margin_ratio_threshold,
@@ -226,8 +220,7 @@ async def _poll_positions_and_maybe_add_margin(
     *,
     acc_id: int,
     okx_cred_id: int,
-    bet: Decimal,
-    add_ratio: Decimal,
+    single_add_margin_usdt: Decimal,
     max_times: int | None,
     maint_margin_ratio_threshold: Decimal | None,
     close_margin_ratio_threshold: Decimal | None,
@@ -326,7 +319,7 @@ async def _poll_positions_and_maybe_add_margin(
         if max_times is not None and _margin_add_counts.get(count_key, 0) >= max_times:
             continue
         cooldown_key = (okx_cred_id, inst_id.upper(), api_pos_side)
-        add_amt: Decimal = bet * add_ratio  # type: ignore[operator]
+        add_amt: Decimal = single_add_margin_usdt
         amt_str = f"{float(add_amt):.8f}".rstrip("0").rstrip(".")
         if not amt_str or (
             amt_str.replace(".", "", 1).isdigit() and float(amt_str) <= 0
@@ -376,8 +369,7 @@ async def _account_margin_loop(follow_account_id: int) -> None:
             await _poll_positions_and_maybe_add_margin(
                 acc_id=int(ctx["acc_id"]),
                 okx_cred_id=int(ctx["okx_cred_id"]),
-                bet=ctx["bet"],
-                add_ratio=ctx["add_ratio"],
+                single_add_margin_usdt=ctx["single_add_margin_usdt"],
                 max_times=ctx["max_times"],
                 maint_margin_ratio_threshold=ctx["maint_margin_ratio_threshold"],
                 close_margin_ratio_threshold=ctx["close_margin_ratio_threshold"],

@@ -57,9 +57,9 @@ class FollowAccount(Base):
     )
     # True：对绑定 OKX 帐户执行真实下单/追加保证金；False：仅模拟跟单记录，不调用私有交易接口。
     live_trading_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # 开仓模式：True=按资产比例开仓；False=按固定下注金额开仓。
+    # 历史字段保留：当前策略固定不使用按资产比例开仓。
     open_by_asset_ratio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # 按资产比例开仓系数：最终比例 = 对方仓位资产占比 × 系数（默认 1）。
+    # 实际语义已切换为持仓量系数：我方下单张数 = 对方持仓张数 × 系数（默认 1）。
     open_by_asset_ratio_coeff: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, default=Decimal("1")
     )

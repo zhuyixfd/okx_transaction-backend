@@ -336,6 +336,66 @@ class OkxFollowOrderClient:
             return False, ("place", data)
         return True, data
 
+    async def place_swap_market_by_sz(
+        self,
+        inst_id: str,
+        sz: str,
+        *,
+        td_mode: str,
+        side: str,
+        pos_side: str | None = None,
+    ) -> tuple[bool, Any]:
+        """U 本位永续市价下单（直接按张数 sz）。"""
+        iid = inst_id.strip().upper()
+        sz_s = str(sz).strip()
+        if not sz_s:
+            return False, {"msg": "sz 不能为空"}
+        # 对齐合约精度：按 lotSz 向下取整，且至少 minSz
+        try:
+            raw_sz = Decimal(sz_s)
+        except InvalidOperation:
+            return False, {"msg": "sz 格式无效", "sz": sz_s}
+        if raw_sz <= 0:
+            return False, {"msg": "sz 须大于 0", "sz": sz_s}
+        q_inst = urlencode({"instType": "SWAP", "instId": iid})
+        ok_i, raw_i = await self._get_public(f"/api/v5/public/instruments?{q_inst}")
+        if not ok_i:
+            return False, raw_i if isinstance(raw_i, dict) else {"msg": str(raw_i)}
+        rows = raw_i.get("data") if isinstance(raw_i, dict) else None
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return False, {"msg": "未找到合约信息", "instId": iid}
+        inst = rows[0]
+        try:
+            lot_sz = Decimal(str(inst.get("lotSz") or "1"))
+            min_sz = Decimal(str(inst.get("minSz") or "1"))
+        except InvalidOperation:
+            return False, {"msg": "合约 lotSz/minSz 解析失败"}
+        if lot_sz <= 0:
+            return False, {"msg": "合约 lotSz 无效"}
+        steps = (raw_sz / lot_sz).to_integral_value(rounding=ROUND_DOWN)
+        sz_adj = steps * lot_sz
+        if sz_adj <= 0 or sz_adj < min_sz:
+            return False, {
+                "msg": "按当前系数换算后张数低于最小下单量",
+                "inputSz": sz_s,
+                "computedSz": self._fmt_okx_sz(sz_adj),
+                "minSz": str(min_sz),
+                "lotSz": str(lot_sz),
+            }
+        params: dict[str, Any] = {
+            "instId": iid,
+            "tdMode": td_mode,
+            "side": side,
+            "ordType": "market",
+            "sz": self._fmt_okx_sz(sz_adj),
+        }
+        if pos_side:
+            params["posSide"] = pos_side
+        if "-SWAP" in iid and td_mode == "isolated":
+            parts = iid.split("-")
+            params["ccy"] = parts[1] if len(parts) >= 2 and parts[1] else "USDT"
+        return await self.place_order(params)
+
     async def get_trade_fills(
         self,
         *,

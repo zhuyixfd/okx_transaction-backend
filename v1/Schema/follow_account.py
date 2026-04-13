@@ -20,8 +20,8 @@ class FollowAccountPatch(BaseModel):
 class FollowConfigPatch(BaseModel):
     """跟单保证金与仓位相关配置（部分更新）。"""
 
-    bet_amount_per_position: Optional[Decimal] = Field(
-        None, ge=0, description="每个仓位下注金额（USDT，作保证金追加计算基数）"
+    single_add_margin_usdt: Optional[Decimal] = Field(
+        None, ge=0, description="单次增加保证金金额（USDT）"
     )
     max_follow_positions: Optional[int] = Field(
         None,
@@ -31,29 +31,25 @@ class FollowConfigPatch(BaseModel):
     )
     bet_mode: Optional[str] = Field(None, description="下注模式：cost=按成本下单")
     margin_add_ratio_of_bet: Optional[Decimal] = Field(
-        None, ge=0, le=1, description="追加金额 = 下注金额 × 该比例"
+        None, ge=0, le=1, description="历史字段（兼容保留）；当前固定为 1"
     )
     margin_auto_enabled: Optional[bool] = Field(
-        None, description="是否启用：根据 OKX 接口监控本人持仓保证金率并自动追加"
+        None, description="历史字段（兼容保留）；当前固定启用自动增加保证金"
     )
     margin_add_max_times: Optional[int] = Field(
         None,
         ge=1,
         le=100_000,
-        description="保证金自动追加次数上限；不传或 null 表示不限制",
+        description="增加保证金次数上限；不传或 null 表示不限制",
     )
     live_trading_enabled: Optional[bool] = Field(
         None,
         description="True=真实交易（调欧易私有接口）；False=仅模拟，不实际下单/追加",
     )
-    open_by_asset_ratio: Optional[bool] = Field(
-        None,
-        description="True=按资产比例开仓；False=按固定下注金额开仓",
-    )
-    open_by_asset_ratio_coeff: Optional[Decimal] = Field(
+    position_size_coeff: Optional[Decimal] = Field(
         None,
         ge=0,
-        description="按资产比例开仓系数（最终比例=对方仓位资产占比×该系数）",
+        description="持仓量系数（我方下单张数=对方持仓张数×该系数）",
     )
     maint_margin_ratio_threshold: Optional[Decimal] = Field(
         None, ge=0, description="维持保证金率阈值（比例值，2=200%）"
@@ -81,13 +77,13 @@ class FollowAccountOut(BaseModel):
         None,
         description="持仓快照表最近一次写入时间（启用时由监控轮询更新标记价后刷新）",
     )
-    bet_amount_per_position: Optional[Decimal] = None
+    single_add_margin_usdt: Optional[Decimal] = None
     max_follow_positions: Optional[int] = None
     bet_mode: str = Field(default="cost", description="cost=按成本下单")
-    margin_add_ratio_of_bet: Decimal = Field(default=Decimal("0.2"))
-    margin_auto_enabled: bool = False
+    margin_add_ratio_of_bet: Decimal = Field(default=Decimal("1"))
+    margin_auto_enabled: bool = True
     margin_add_max_times: Optional[int] = Field(
-        None, description="保证金自动追加次数上限；null 表示不限制"
+        None, description="增加保证金次数上限；null 表示不限制"
     )
     okx_api_account_id: Optional[int] = Field(
         None, description="绑定的 OKX API 帐户 id（okx_api_accounts.id）"
@@ -96,13 +92,9 @@ class FollowAccountOut(BaseModel):
         False,
         description="是否启用真实交易（否则为模拟，不调欧易私有交易接口）",
     )
-    open_by_asset_ratio: bool = Field(
-        False,
-        description="是否按资产比例开仓（否则按固定下注金额）",
-    )
-    open_by_asset_ratio_coeff: Decimal = Field(
+    position_size_coeff: Decimal = Field(
         default=Decimal("1"),
-        description="按资产比例开仓系数（默认 1）",
+        description="持仓量系数（默认 1）",
     )
     maint_margin_ratio_threshold: Optional[Decimal] = Field(
         None, description="维持保证金率阈值（比例值，2=200%）"

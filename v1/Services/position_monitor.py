@@ -194,15 +194,12 @@ def _should_emit_live_open(acc: FollowAccount) -> bool:
         return False
     if acc.okx_api_account_id is None:
         return False
-    if bool(acc.open_by_asset_ratio):
-        coeff = (
-            Decimal(str(acc.open_by_asset_ratio_coeff))
-            if acc.open_by_asset_ratio_coeff is not None
-            else Decimal("1")
-        )
-        return coeff > 0
-    bet = acc.bet_amount_per_position
-    return bet is not None and bet > 0
+    coeff = (
+        Decimal(str(acc.open_by_asset_ratio_coeff))
+        if acc.open_by_asset_ratio_coeff is not None
+        else Decimal("1")
+    )
+    return coeff > 0
 
 
 def _append_live_follow_open_intent(
@@ -222,26 +219,21 @@ def _append_live_follow_open_intent(
     ps = (row.get("posSide") or "").strip().lower()
     if ps not in ("long", "short"):
         return
-    principal_s = ""
-    principal_ratio_s: str | None = None
-    if bool(acc.open_by_asset_ratio):
-        src_eq = source_equity_usdt if source_equity_usdt is not None else Decimal(0)
-        src_notional = _row_notional_usd(row)
-        coeff = (
-            Decimal(str(acc.open_by_asset_ratio_coeff))
-            if acc.open_by_asset_ratio_coeff is not None
-            else Decimal("1")
-        )
-        if src_eq <= 0 or src_notional <= 0 or coeff <= 0:
-            return
-        principal_ratio_s = format((src_notional / src_eq) * coeff, "f")
-    else:
-        bet = acc.bet_amount_per_position
-        if bet is None or bet <= 0:
-            return
-        principal_s = format(bet, "f").rstrip("0").rstrip(".")
-        if not principal_s:
-            return
+    coeff = (
+        Decimal(str(acc.open_by_asset_ratio_coeff))
+        if acc.open_by_asset_ratio_coeff is not None
+        else Decimal("1")
+    )
+    try:
+        src_pos = abs(Decimal(str(row.get("pos") or "0").strip()))
+    except Exception:
+        src_pos = Decimal(0)
+    if coeff <= 0 or src_pos <= 0:
+        return
+    contracts = (src_pos * coeff).normalize()
+    contracts_s = format(contracts, "f").rstrip("0").rstrip(".")
+    if not contracts_s:
+        return
     lev_s = str(row.get("lever") or "").strip()
     oid = acc.okx_api_account_id
     if oid is None:
@@ -255,8 +247,7 @@ def _append_live_follow_open_intent(
             inst_id=normalize_swap_inst_id(ccy),
             pos_side=ps,
             lever_str=lev_s if lev_s else None,
-            principal_usdt=principal_s,
-            principal_ratio_of_my_equity=principal_ratio_s,
+            contracts=contracts_s,
         )
     )
 
@@ -448,32 +439,33 @@ def _reconcile_sim_follow_set(
         if pid not in eligible:
             _close_sim_at_exit(db, acc, pid, new_map[pid], None, close_intents)
             continue
-        if not bool(acc.open_by_asset_ratio):
-            continue
         old_row = old_map.get(pid)
         new_row = new_map.get(pid)
         if not isinstance(old_row, dict) or not isinstance(new_row, dict):
             continue
-        old_notional = _row_notional_usd(old_row)
-        new_notional = _row_notional_usd(new_row)
-        if old_notional <= 0 or new_notional <= 0 or old_notional == new_notional:
+        try:
+            old_pos = abs(Decimal(str(old_row.get("pos") or "0").strip()))
+            new_pos = abs(Decimal(str(new_row.get("pos") or "0").strip()))
+        except Exception:
+            continue
+        if old_pos <= 0 or new_pos <= 0 or old_pos == new_pos:
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         ps = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
         if not inst_id or ps not in ("long", "short") or acc.okx_api_account_id is None:
             continue
         lever_s = str(new_row.get("lever", "")).strip() or None
-        if new_notional > old_notional:
-            src_eq = source_equity_usdt if source_equity_usdt is not None else Decimal(0)
-            coeff = (
-                Decimal(str(acc.open_by_asset_ratio_coeff))
-                if acc.open_by_asset_ratio_coeff is not None
-                else Decimal("1")
-            )
-            if src_eq <= 0:
-                continue
-            ratio = ((new_notional - old_notional) / src_eq) * coeff
-            if ratio <= 0:
+        coeff = (
+            Decimal(str(acc.open_by_asset_ratio_coeff))
+            if acc.open_by_asset_ratio_coeff is not None
+            else Decimal("1")
+        )
+        if coeff <= 0:
+            continue
+        if new_pos > old_pos:
+            contracts = (new_pos - old_pos) * coeff
+            contracts_s = format(contracts, "f").rstrip("0").rstrip(".")
+            if not contracts_s:
                 continue
             adjust_intents.append(
                 LiveFollowAdjustIntent(
@@ -484,14 +476,14 @@ def _reconcile_sim_follow_set(
                     pos_side=ps,
                     lever_str=lever_s,
                     action="add",
-                    add_ratio_of_my_equity=format(ratio, "f"),
-                    reduce_ratio_of_my_notional=None,
+                    contracts=contracts_s,
                 )
             )
             rec.add_position_count = int(rec.add_position_count or 0) + 1
         else:
-            ratio = (old_notional - new_notional) / old_notional
-            if ratio <= 0:
+            contracts = (old_pos - new_pos) * coeff
+            contracts_s = format(contracts, "f").rstrip("0").rstrip(".")
+            if not contracts_s:
                 continue
             adjust_intents.append(
                 LiveFollowAdjustIntent(
@@ -502,8 +494,7 @@ def _reconcile_sim_follow_set(
                     pos_side=ps,
                     lever_str=lever_s,
                     action="reduce",
-                    add_ratio_of_my_equity=None,
-                    reduce_ratio_of_my_notional=format(ratio, "f"),
+                    contracts=contracts_s,
                 )
             )
             rec.reduce_position_count = int(rec.reduce_position_count or 0) + 1

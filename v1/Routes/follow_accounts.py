@@ -155,18 +155,17 @@ def _to_out(
         last_enabled_at=row.last_enabled_at,
         created_at=row.created_at,
         positions_refreshed_at=positions_refreshed_at,
-        bet_amount_per_position=row.bet_amount_per_position,
+        single_add_margin_usdt=row.bet_amount_per_position,
         max_follow_positions=row.max_follow_positions,
         bet_mode=row.bet_mode or "cost",
         margin_add_ratio_of_bet=row.margin_add_ratio_of_bet
         if row.margin_add_ratio_of_bet is not None
-        else Decimal("0.2"),
-        margin_auto_enabled=bool(row.margin_auto_enabled),
+        else Decimal("1"),
+        margin_auto_enabled=True,
         margin_add_max_times=row.margin_add_max_times,
         okx_api_account_id=row.okx_api_account_id,
         live_trading_enabled=bool(row.live_trading_enabled),
-        open_by_asset_ratio=bool(row.open_by_asset_ratio),
-        open_by_asset_ratio_coeff=row.open_by_asset_ratio_coeff
+        position_size_coeff=row.open_by_asset_ratio_coeff
         if row.open_by_asset_ratio_coeff is not None
         else Decimal("1"),
         maint_margin_ratio_threshold=row.maint_margin_ratio_threshold,
@@ -1394,13 +1393,22 @@ def patch_follow_config(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="启用真实交易前请先绑定跟单帐户（OKX API）",
         )
-    # 跟单配置固定策略：直接启用真实交易 + 按固定下注金额开仓（非资产比例）。
+    # 跟单配置固定策略：直接启用真实交易；系数按“持仓量系数”写入历史列 open_by_asset_ratio_coeff。
+    single_add_margin_usdt = data.pop("single_add_margin_usdt", None)
     data.pop("live_trading_enabled", None)
     data.pop("open_by_asset_ratio", None)
+    coeff = data.pop("position_size_coeff", None)
     data.pop("open_by_asset_ratio_coeff", None)
+    data.pop("margin_auto_enabled", None)
+    data.pop("margin_add_ratio_of_bet", None)
+    if single_add_margin_usdt is not None:
+        row.bet_amount_per_position = Decimal(str(single_add_margin_usdt))
     row.live_trading_enabled = True
+    row.margin_auto_enabled = True
+    row.margin_add_ratio_of_bet = Decimal("1")
     row.open_by_asset_ratio = False
-    row.open_by_asset_ratio_coeff = Decimal("1")
+    if coeff is not None:
+        row.open_by_asset_ratio_coeff = Decimal(str(coeff))
     for key, val in data.items():
         setattr(row, key, val)
     db.commit()

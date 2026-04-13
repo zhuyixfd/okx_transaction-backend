@@ -81,8 +81,7 @@ class LiveFollowOpenIntent:
     inst_id: str
     pos_side: str
     lever_str: str | None
-    principal_usdt: str
-    principal_ratio_of_my_equity: str | None = None
+    contracts: str
 
 
 @dataclass(frozen=True)
@@ -103,8 +102,7 @@ class LiveFollowAdjustIntent:
     pos_side: str
     lever_str: str | None
     action: str  # add | reduce
-    add_ratio_of_my_equity: str | None = None
-    reduce_ratio_of_my_notional: str | None = None
+    contracts: str
 
 
 def _set_live_open_ok(sim_id: int, value: bool) -> None:
@@ -264,31 +262,10 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                 return
             sizing_lever = picked
 
-        principal_s = intent.principal_usdt.strip()
-        if not principal_s and intent.principal_ratio_of_my_equity:
-            ratio = _dec(intent.principal_ratio_of_my_equity)
-            if ratio is None or ratio <= 0:
-                _set_live_open_ok(intent.sim_record_id, False)
-                return
-            ok_bal, bal = await client.get_account_balance("USDT")
-            if not ok_bal or not isinstance(bal, dict):
-                _set_live_open_ok(intent.sim_record_id, False)
-                return
-            b0 = (bal.get("data") or [None])[0]
-            total_eq = _dec((b0 or {}).get("totalEq")) if isinstance(b0, dict) else None
-            if total_eq is None or total_eq <= 0:
-                _set_live_open_ok(intent.sim_record_id, False)
-                return
-            principal = total_eq * ratio
-            principal_s = format(principal, "f").rstrip("0").rstrip(".")
-            if not principal_s:
-                _set_live_open_ok(intent.sim_record_id, False)
-                return
-
-        ok_order, payload = await client.place_swap_market_by_principal_usdt(
+        contracts = intent.contracts.strip()
+        ok_order, payload = await client.place_swap_market_by_sz(
             inst_id,
-            principal_s,
-            leverage=sizing_lever,
+            contracts,
             td_mode=td_mode,
             side=side,
             pos_side=pos_side if hedge_mode else None,
@@ -410,47 +387,8 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     if target_row is None:
         return
 
-    principal: Decimal | None = None
-    if intent.action == "add":
-        ratio = _dec(intent.add_ratio_of_my_equity)
-        if ratio is None or ratio <= 0:
-            return
-        ok_bal, bal = await client.get_account_balance("USDT")
-        if not ok_bal or not isinstance(bal, dict):
-            return
-        b0 = (bal.get("data") or [None])[0]
-        total_eq = _dec((b0 or {}).get("totalEq")) if isinstance(b0, dict) else None
-        if total_eq is None or total_eq <= 0:
-            return
-        principal = total_eq * ratio
-    else:
-        ratio = _dec(intent.reduce_ratio_of_my_notional)
-        if ratio is None or ratio <= 0:
-            return
-        notional = _dec(target_row.get("notionalUsd")) or _dec(target_row.get("notional"))
-        if notional is None or notional <= 0:
-            return
-        principal = notional * ratio
-    if principal is None or principal <= 0:
-        return
-
-    principal_s = format(principal, "f").rstrip("0").rstrip(".")
-    if not principal_s:
-        return
-
-    lever_i: int | None = None
-    if intent.lever_str:
-        try:
-            lever_i = int(intent.lever_str)
-        except ValueError:
-            lever_i = None
-    if lever_i is None:
-        ok_li, li_data = await client.get_leverage_info(intent.inst_id, td_mode)
-        if ok_li:
-            lever_i = sizing_lever_from_leverage_info(
-                li_data, hedge_mode=hedge_mode, pos_side=intent.pos_side
-            )
-    if lever_i is None:
+    contracts = intent.contracts.strip()
+    if not contracts:
         return
 
     side: str
@@ -458,10 +396,9 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         side = "buy" if intent.pos_side == "long" else "sell"
     else:
         side = "sell" if intent.pos_side == "long" else "buy"
-    ok_order, _ = await client.place_swap_market_by_principal_usdt(
+    ok_order, _ = await client.place_swap_market_by_sz(
         intent.inst_id,
-        principal_s,
-        leverage=lever_i,
+        contracts,
         td_mode=td_mode,
         side=side,
         pos_side=intent.pos_side if hedge_mode else None,

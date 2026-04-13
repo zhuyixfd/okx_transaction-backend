@@ -1389,16 +1389,18 @@ def patch_follow_config(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="当前仅支持 bet_mode=cost（按成本下单）",
         )
-    merged_live = (
-        bool(data["live_trading_enabled"])
-        if "live_trading_enabled" in data and data["live_trading_enabled"] is not None
-        else bool(row.live_trading_enabled)
-    )
-    if merged_live and row.okx_api_account_id is None:
+    if row.okx_api_account_id is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="启用真实交易前请先绑定跟单帐户（OKX API）",
         )
+    # 跟单配置固定策略：直接启用真实交易 + 按固定下注金额开仓（非资产比例）。
+    data.pop("live_trading_enabled", None)
+    data.pop("open_by_asset_ratio", None)
+    data.pop("open_by_asset_ratio_coeff", None)
+    row.live_trading_enabled = True
+    row.open_by_asset_ratio = False
+    row.open_by_asset_ratio_coeff = Decimal("1")
     for key, val in data.items():
         setattr(row, key, val)
     db.commit()

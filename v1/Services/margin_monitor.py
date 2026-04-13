@@ -59,9 +59,9 @@ COOLDOWN_SEC = 0.5
 """同一 OKX 密钥、同一合约、同一 posSide 两次成功追加之间的最短间隔（秒）。"""
 CLOSE_COOLDOWN_SEC = 0.5
 """同一 OKX 密钥、同一合约、同一 posSide 两次成功平仓触发之间的最短间隔（秒）。"""
-_ACCOUNT_MARGIN_INTERVAL_SEC = 0.8
+_ACCOUNT_MARGIN_INTERVAL_SEC = 2.0
 """每个跟单帐户协程的轮询间隔（秒）。"""
-_SUPERVISOR_INTERVAL_SEC = 0.8
+_SUPERVISOR_INTERVAL_SEC = 2.0
 """主管协程对齐「应监控的跟单 id 列表」的间隔（秒）。"""
 # 欧易 GET /account/positions 的 mgnRatio 为比例：2.0 = 200%，与前端 formatMaintMarginRatioPct 的 ×100 一致
 MAINT_MARGIN_RATIO_THRESHOLD = 2.0

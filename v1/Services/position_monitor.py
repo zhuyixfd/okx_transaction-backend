@@ -697,7 +697,7 @@ def _sync_apply_positions(
 
 
 # 每帐户独立协程内的轮询间隔（秒）；各帐户互不影响。
-_ACCOUNT_POLL_INTERVAL_SEC = 2.0
+_ACCOUNT_POLL_INTERVAL_SEC = 0.8
 _OVERVIEW_REFRESH_INTERVAL_SEC = 5.0
 
 

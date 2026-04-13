@@ -544,44 +544,6 @@ async def get_overview_data(
     }
 
 
-@router.get("/linked-okx/fills")
-async def linked_okx_trade_fills(
-    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
-    inst_type: str = Query("SWAP"),
-    inst_id: str | None = Query(None, description="可选，仅某一交易对"),
-    limit: int = Query(50, ge=1, le=100),
-    db: Session = Depends(get_db),
-) -> dict:
-    """
-    本人合约成交（欧易 GET /api/v5/trade/fills）。
-    使用本页绑定的 okx_api_accounts；实现为 OkxFollowOrderClient.get_trade_fills。
-    """
-    client = _require_linked_okx_client(db, unique_name)
-    ok, data = await client.get_trade_fills(
-        inst_type=inst_type,
-        inst_id=inst_id.strip() if inst_id else None,
-        limit=limit,
-    )
-    if not ok:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
-    return data  # type: ignore[return-value]
-
-
-@router.get("/linked-okx/margin-bills")
-async def linked_okx_margin_bills(
-    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
-    inst_type: str = Query("SWAP"),
-    limit: int = Query(100, ge=1, le=100),
-    db: Session = Depends(get_db),
-) -> dict:
-    """本人保证金划转类账单（欧易 bills-archive type=6）；OkxFollowOrderClient.get_margin_transfer_bills。"""
-    client = _require_linked_okx_client(db, unique_name)
-    ok, data = await client.get_margin_transfer_bills(inst_type=inst_type, limit=limit)
-    if not ok:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
-    return data  # type: ignore[return-value]
-
-
 @router.get("/linked-okx/positions")
 async def linked_okx_positions(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
@@ -605,26 +567,6 @@ async def linked_okx_account_balance(
     """本人资产余额（欧易 GET /api/v5/account/balance）。"""
     client = _require_linked_okx_client(db, unique_name)
     ok, data = await client.get_account_balance(ccy=ccy)
-    if not ok:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
-    return data  # type: ignore[return-value]
-
-
-@router.get("/linked-okx/positions-history")
-async def linked_okx_positions_history(
-    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
-    inst_type: str = Query("SWAP"),
-    mgn_mode: str | None = Query(None, description="保证金模式，可选：cross/isolated"),
-    limit: int = Query(100, ge=1, le=100),
-    db: Session = Depends(get_db),
-) -> dict:
-    """本人历史持仓（欧易 GET /api/v5/account/positions-history）。"""
-    client = _require_linked_okx_client(db, unique_name)
-    ok, data = await client.get_positions_history(
-        inst_type=inst_type,
-        mgn_mode=mgn_mode,
-        limit=limit,
-    )
     if not ok:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=data)
     return data  # type: ignore[return-value]

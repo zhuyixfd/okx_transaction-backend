@@ -1188,6 +1188,7 @@ async def snapshot_follow_once(
     ok_pos, pos_payload = await client.get_positions_inst("SWAP")
     if not ok_pos:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=pos_payload)
+    has_existing_position = False
     for p in (pos_payload.get("data") or []):
         if not isinstance(p, dict):
             continue
@@ -1198,7 +1199,8 @@ async def snapshot_follow_once(
         except ValueError:
             pv = 0.0
         if abs(pv) > 1e-12:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该币种当前已有持仓")
+            has_existing_position = True
+            break
 
     lever_i: int | None = None
     lv_raw = str(row.get("lever", "")).strip()
@@ -1224,15 +1226,35 @@ async def snapshot_follow_once(
     if not contracts_s:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="按持仓量系数计算后张数无效")
 
-    ok_open, payload_open = await client.place_swap_market_by_sz(
-        inst_id,
-        contracts_s,
-        td_mode=td_mode,
-        side="buy" if pos_side == "long" else "sell",
-        pos_side=pos_side if hedge_mode else None,
+    latest = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(
+                FollowSimRecord.follow_account_id == acc.id,
+                FollowSimRecord.pos_id == pid,
+            )
+            .order_by(FollowSimRecord.id.desc())
+            .limit(1)
+        )
+        .scalar_one_or_none()
     )
-    if not ok_open:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload_open)
+    if latest is not None and latest.status == "open":
+        latest.live_close_ok = None
+        latest.updated_at = now_cn()
+        db.commit()
+        db.refresh(latest)
+        return {"ok": True, "sim_record_id": latest.id, "already_open": True}
+
+    if not has_existing_position:
+        ok_open, payload_open = await client.place_swap_market_by_sz(
+            inst_id,
+            contracts_s,
+            td_mode=td_mode,
+            side="buy" if pos_side == "long" else "sell",
+            pos_side=pos_side if hedge_mode else None,
+        )
+        if not ok_open:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=payload_open)
 
     now = now_cn()
     rec = FollowSimRecord(
@@ -1266,7 +1288,7 @@ async def snapshot_follow_once(
     db.add(rec)
     db.commit()
     db.refresh(rec)
-    return {"ok": True, "sim_record_id": rec.id}
+    return {"ok": True, "sim_record_id": rec.id, "already_holding": has_existing_position}
 
 
 @router.post("/snapshot-follow-stop")

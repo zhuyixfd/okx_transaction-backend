@@ -393,7 +393,8 @@ def _same_source_position_recently_closed(
         .order_by(FollowSimRecord.id.desc())
         .limit(1)
     ).scalar_one_or_none()
-    if rec is None or rec.close_event_id is None:
+    # 仅把「手动关闭跟单」视为关闭标记；其余 closed（如自然平仓）不阻止默认开启跟单。
+    if rec is None or rec.close_event_id is None or rec.live_close_ok is not True:
         return False
     ev = db.get(FollowPositionEvent, rec.close_event_id)
     if ev is None or not ev.detail_json:

@@ -1381,6 +1381,8 @@ async def snapshot_follow_stop_once(
         latest.exit_px = exit_px
         latest.last_mark_px = exit_px
         latest.close_event_id = close_ev.id
+        # 显式标记为「手动关闭跟单」，用于后续默认开启判定。
+        latest.live_close_ok = True
         latest.closed_at = now_cn()
         latest.updated_at = now_cn()
         target_rec_id = latest.id

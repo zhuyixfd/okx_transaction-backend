@@ -701,6 +701,12 @@ _ACCOUNT_POLL_INTERVAL_SEC = 0.8
 _OVERVIEW_REFRESH_INTERVAL_SEC = 5.0
 
 
+async def _fetch_overview_equity(unique_name: str) -> str | None:
+    overview = await OkxTrade.get_overview_data(unique_name)
+    src_eq = None if not isinstance(overview, dict) else overview.get("equity")
+    return None if src_eq is None else str(src_eq)
+
+
 async def _account_position_loop(account_id: int, unique_name: str) -> None:
     """
     单个启用帐户的持仓轮询：异步请求欧易 + 线程池写库。
@@ -708,36 +714,70 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
     """
     last_overview_fetch_mono = 0.0
     cached_src_eq: str | None = None
-    while True:
-        try:
-            raw = await OkxTrade.get_position_current(unique_name)
-            if not isinstance(raw, list):
-                raw = []
-            now_mono = time.monotonic()
-            if (
-                cached_src_eq is None
-                or (now_mono - last_overview_fetch_mono) >= _OVERVIEW_REFRESH_INTERVAL_SEC
-            ):
-                overview = await OkxTrade.get_overview_data(unique_name)
-                src_eq = None if not isinstance(overview, dict) else overview.get("equity")
-                cached_src_eq = None if src_eq is None else str(src_eq)
-                last_overview_fetch_mono = now_mono
-            closes, opens, adjusts = await asyncio.to_thread(
-                _sync_apply_positions,
-                account_id,
-                raw,
-                cached_src_eq,
-            )
-            _log(
-                f"tick follow_id={account_id} unique_name={unique_name!r} "
-                f"positions={len(raw)} close={len(closes)} open={len(opens)} adjust={len(adjusts)}"
-            )
-            await run_live_follow_intents(closes, opens, adjusts)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            _log(f"api error unique_name={unique_name!r}: {e!r}")
-        await asyncio.sleep(_ACCOUNT_POLL_INTERVAL_SEC)
+    overview_task: asyncio.Task[str | None] | None = None
+    intents_queue: asyncio.Queue[
+        tuple[list[LiveFollowCloseIntent], list[LiveFollowOpenIntent], list[LiveFollowAdjustIntent]]
+    ] = asyncio.Queue()
+
+    async def _intents_worker() -> None:
+        while True:
+            closes, opens, adjusts = await intents_queue.get()
+            try:
+                await run_live_follow_intents(closes, opens, adjusts)
+            except Exception as e:
+                _log(f"run_live_follow_intents error unique_name={unique_name!r}: {e!r}")
+            finally:
+                intents_queue.task_done()
+
+    intents_worker_task = asyncio.create_task(_intents_worker())
+    try:
+        while True:
+            try:
+                # 对方持仓主链路：优先拉取，不等待 overview。
+                raw = await OkxTrade.get_position_current(unique_name)
+                if not isinstance(raw, list):
+                    raw = []
+
+                now_mono = time.monotonic()
+                need_refresh_overview = (
+                    cached_src_eq is None
+                    or (now_mono - last_overview_fetch_mono) >= _OVERVIEW_REFRESH_INTERVAL_SEC
+                )
+                if need_refresh_overview and overview_task is None:
+                    overview_task = asyncio.create_task(_fetch_overview_equity(unique_name))
+
+                if overview_task is not None and overview_task.done():
+                    try:
+                        cached_src_eq = overview_task.result()
+                        last_overview_fetch_mono = now_mono
+                    except Exception as e:
+                        _log(f"overview fetch error unique_name={unique_name!r}: {e!r}")
+                    finally:
+                        overview_task = None
+
+                closes, opens, adjusts = await asyncio.to_thread(
+                    _sync_apply_positions,
+                    account_id,
+                    raw,
+                    cached_src_eq,
+                )
+                _log(
+                    f"tick follow_id={account_id} unique_name={unique_name!r} "
+                    f"positions={len(raw)} close={len(closes)} open={len(opens)} adjust={len(adjusts)}"
+                )
+                if closes or opens or adjusts:
+                    await intents_queue.put((closes, opens, adjusts))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                _log(f"api error unique_name={unique_name!r}: {e!r}")
+            await asyncio.sleep(_ACCOUNT_POLL_INTERVAL_SEC)
+    finally:
+        if overview_task is not None and not overview_task.done():
+            overview_task.cancel()
+            await asyncio.gather(overview_task, return_exceptions=True)
+        intents_worker_task.cancel()
+        await asyncio.gather(intents_worker_task, return_exceptions=True)
 
 
 async def position_monitor_loop() -> None:

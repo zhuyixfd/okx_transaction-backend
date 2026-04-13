@@ -410,6 +410,32 @@ def _same_source_position_recently_closed(
     return bool(old_ct) and old_ct == new_ct
 
 
+def _blocked_ccy_set(db: Session, acc_id: int) -> set[str]:
+    """
+    币种级别的“手动关闭跟单”状态。
+    规则：同一币种取最新一条模拟记录；若最新为 closed 且 live_close_ok=True，则该币种禁跟。
+    """
+    rows = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(FollowSimRecord.follow_account_id == acc_id)
+            .order_by(FollowSimRecord.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    seen: set[str] = set()
+    blocked: set[str] = set()
+    for r in rows:
+        ccy = str(r.pos_ccy or "").strip().upper()
+        if not ccy or ccy in seen:
+            continue
+        seen.add(ccy)
+        if r.status == "closed" and r.live_close_ok is True:
+            blocked.add(ccy)
+    return blocked
+
+
 def _reconcile_sim_follow_set(
     db: Session,
     acc: FollowAccount,
@@ -422,6 +448,7 @@ def _reconcile_sim_follow_set(
     skip_open_pids: frozenset[str] = frozenset(),
     old_map: dict[str, dict[str, Any]],
     source_equity_usdt: Decimal | None,
+    blocked_ccys: set[str],
 ) -> None:
     """仓位仍在对方快照中但掉出「可跟 n」时结算模拟；新进 n 且无模拟行时补开模拟。
 
@@ -448,6 +475,10 @@ def _reconcile_sim_follow_set(
             continue
         new_row = new_map.get(pid)
         if not isinstance(new_row, dict):
+            continue
+        ccy = str(new_row.get("posCcy", "")).strip().upper()
+        if ccy and ccy in blocked_ccys:
+            _close_sim_at_exit(db, acc, pid, new_row, None, close_intents)
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         ps = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
@@ -487,6 +518,9 @@ def _reconcile_sim_follow_set(
         if pid not in new_map:
             continue
         if pid in skip_open_pids:
+            continue
+        ccy = str(new_map[pid].get("posCcy", "")).strip().upper()
+        if ccy and ccy in blocked_ccys:
             continue
         if _same_source_position_recently_closed(db, acc_id, pid, new_map[pid]):
             continue
@@ -561,8 +595,16 @@ def _apply_snapshot_and_events(
             old_map = {}
 
     open_branch_handled_pids: set[str] = set()
+    blocked_ccys = _blocked_ccy_set(db, acc.id)
 
     for pid, row in new_map.items():
+        ccy = str(row.get("posCcy", "")).strip().upper()
+        if ccy and ccy in blocked_ccys:
+            # 已手动关闭跟单的币种：若检测到仓位，强制走平仓链路（含手动买入场景）。
+            sid = _create_sim_open(db, acc, row, pid, open_ev=None)
+            if sid is not None:
+                _close_sim_at_exit(db, acc, pid, row, None, close_intents)
+            continue
         if pid not in old_map:
             ev = FollowPositionEvent(
                 follow_account_id=acc.id,
@@ -635,6 +677,7 @@ def _apply_snapshot_and_events(
         skip_open_pids=frozenset(open_branch_handled_pids),
         old_map=old_map,
         source_equity_usdt=source_equity_usdt,
+        blocked_ccys=blocked_ccys,
     )
     _refresh_sim_unrealized(db, acc.id, new_map)
     db.commit()

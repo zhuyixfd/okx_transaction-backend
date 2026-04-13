@@ -698,6 +698,7 @@ def _sync_apply_positions(
 
 # 每帐户独立协程内的轮询间隔（秒）；各帐户互不影响。
 _ACCOUNT_POLL_INTERVAL_SEC = 0.8
+_OVERVIEW_REFRESH_INTERVAL_SEC = 5.0
 
 
 async def _account_position_loop(account_id: int, unique_name: str) -> None:
@@ -705,18 +706,27 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
     单个启用帐户的持仓轮询：异步请求欧易 + 线程池写库。
     与其它帐户并发运行；某一帐户接口变慢不会拖慢其它帐户。
     """
+    last_overview_fetch_mono = 0.0
+    cached_src_eq: str | None = None
     while True:
         try:
             raw = await OkxTrade.get_position_current(unique_name)
             if not isinstance(raw, list):
                 raw = []
-            overview = await OkxTrade.get_overview_data(unique_name)
-            src_eq = None if not isinstance(overview, dict) else overview.get("equity")
+            now_mono = time.monotonic()
+            if (
+                cached_src_eq is None
+                or (now_mono - last_overview_fetch_mono) >= _OVERVIEW_REFRESH_INTERVAL_SEC
+            ):
+                overview = await OkxTrade.get_overview_data(unique_name)
+                src_eq = None if not isinstance(overview, dict) else overview.get("equity")
+                cached_src_eq = None if src_eq is None else str(src_eq)
+                last_overview_fetch_mono = now_mono
             closes, opens, adjusts = await asyncio.to_thread(
                 _sync_apply_positions,
                 account_id,
                 raw,
-                None if src_eq is None else str(src_eq),
+                cached_src_eq,
             )
             _log(
                 f"tick follow_id={account_id} unique_name={unique_name!r} "

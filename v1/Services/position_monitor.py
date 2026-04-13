@@ -439,16 +439,8 @@ def _reconcile_sim_follow_set(
         if pid not in eligible:
             _close_sim_at_exit(db, acc, pid, new_map[pid], None, close_intents)
             continue
-        old_row = old_map.get(pid)
         new_row = new_map.get(pid)
-        if not isinstance(old_row, dict) or not isinstance(new_row, dict):
-            continue
-        try:
-            old_pos = abs(Decimal(str(old_row.get("pos") or "0").strip()))
-            new_pos = abs(Decimal(str(new_row.get("pos") or "0").strip()))
-        except Exception:
-            continue
-        if old_pos <= 0 or new_pos <= 0 or old_pos == new_pos:
+        if not isinstance(new_row, dict):
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         ps = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
@@ -462,42 +454,27 @@ def _reconcile_sim_follow_set(
         )
         if coeff <= 0:
             continue
-        if new_pos > old_pos:
-            contracts = (new_pos - old_pos) * coeff
-            contracts_s = format(contracts, "f").rstrip("0").rstrip(".")
-            if not contracts_s:
-                continue
-            adjust_intents.append(
-                LiveFollowAdjustIntent(
-                    follow_account_id=acc.id,
-                    okx_api_account_id=acc.okx_api_account_id,
-                    sim_record_id=rec.id,
-                    inst_id=inst_id,
-                    pos_side=ps,
-                    lever_str=lever_s,
-                    action="add",
-                    contracts=contracts_s,
-                )
+        try:
+            src_pos = abs(Decimal(str(new_row.get("pos") or "0").strip()))
+        except Exception:
+            src_pos = Decimal(0)
+        if src_pos <= 0:
+            continue
+        target_contracts_s = format(src_pos * coeff, "f").rstrip("0").rstrip(".")
+        if not target_contracts_s:
+            continue
+        adjust_intents.append(
+            LiveFollowAdjustIntent(
+                follow_account_id=acc.id,
+                okx_api_account_id=acc.okx_api_account_id,
+                sim_record_id=rec.id,
+                inst_id=inst_id,
+                pos_side=ps,
+                lever_str=lever_s,
+                action="rebalance",
+                contracts=target_contracts_s,
             )
-            rec.add_position_count = int(rec.add_position_count or 0) + 1
-        else:
-            contracts = (old_pos - new_pos) * coeff
-            contracts_s = format(contracts, "f").rstrip("0").rstrip(".")
-            if not contracts_s:
-                continue
-            adjust_intents.append(
-                LiveFollowAdjustIntent(
-                    follow_account_id=acc.id,
-                    okx_api_account_id=acc.okx_api_account_id,
-                    sim_record_id=rec.id,
-                    inst_id=inst_id,
-                    pos_side=ps,
-                    lever_str=lever_s,
-                    action="reduce",
-                    contracts=contracts_s,
-                )
-            )
-            rec.reduce_position_count = int(rec.reduce_position_count or 0) + 1
+        )
 
     for pid in eligible:
         if pid not in new_map:

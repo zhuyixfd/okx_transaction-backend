@@ -101,8 +101,8 @@ class LiveFollowAdjustIntent:
     inst_id: str
     pos_side: str
     lever_str: str | None
-    action: str  # add | reduce
-    contracts: str
+    action: str  # add | reduce | rebalance
+    contracts: str  # add/reduce 为变动张数；rebalance 为目标总张数
 
 
 def _set_live_open_ok(sim_id: int, value: bool) -> None:
@@ -384,21 +384,38 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
             continue
         target_row = row
         break
-    if target_row is None:
-        return
-
     contracts = intent.contracts.strip()
     if not contracts:
         return
 
     side: str
-    if intent.action == "add":
+    place_contracts = contracts
+    if intent.action == "rebalance":
+        want = _dec(contracts)
+        if want is None or want <= 0:
+            return
+        cur = Decimal("0")
+        if target_row is not None:
+            c = _dec(target_row.get("pos"))
+            if c is not None:
+                cur = abs(c)
+        diff = want - cur
+        if abs(diff) < Decimal("1e-12"):
+            return
+        place_contracts = format(abs(diff), "f").rstrip("0").rstrip(".")
+        if not place_contracts:
+            return
+        if diff > 0:
+            side = "buy" if intent.pos_side == "long" else "sell"
+        else:
+            side = "sell" if intent.pos_side == "long" else "buy"
+    elif intent.action == "add":
         side = "buy" if intent.pos_side == "long" else "sell"
     else:
         side = "sell" if intent.pos_side == "long" else "buy"
     ok_order, _ = await client.place_swap_market_by_sz(
         intent.inst_id,
-        contracts,
+        place_contracts,
         td_mode=td_mode,
         side=side,
         pos_side=intent.pos_side if hedge_mode else None,

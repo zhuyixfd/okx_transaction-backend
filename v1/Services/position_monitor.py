@@ -410,6 +410,26 @@ def _same_source_position_recently_closed(
     return bool(old_ct) and old_ct == new_ct
 
 
+def _pid_manually_closed(db: Session, acc_id: int, pid: str) -> bool:
+    """
+    同一 pos_id 的最新一条记录若为 closed 且 live_close_ok=True，
+    视为「手动关闭跟单」，在手动重新开启前禁止自动重开。
+    """
+    rec = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(
+                FollowSimRecord.follow_account_id == acc_id,
+                FollowSimRecord.pos_id == pid,
+            )
+            .order_by(FollowSimRecord.id.desc())
+            .limit(1)
+        )
+        .scalar_one_or_none()
+    )
+    return bool(rec is not None and rec.status == "closed" and rec.live_close_ok is True)
+
+
 def _blocked_ccy_set(db: Session, acc_id: int) -> set[str]:
     """
     币种级别的“手动关闭跟单”状态。
@@ -478,7 +498,7 @@ def _reconcile_sim_follow_set(
             continue
         ccy = str(new_row.get("posCcy", "")).strip().upper()
         if ccy and ccy in blocked_ccys:
-            _close_sim_at_exit(db, acc, pid, new_row, None, close_intents)
+            # 手动关闭后仅停止跟单，不自动平仓。
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         ps = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
@@ -518,6 +538,8 @@ def _reconcile_sim_follow_set(
         if pid not in new_map:
             continue
         if pid in skip_open_pids:
+            continue
+        if _pid_manually_closed(db, acc_id, pid):
             continue
         ccy = str(new_map[pid].get("posCcy", "")).strip().upper()
         if ccy and ccy in blocked_ccys:
@@ -598,12 +620,11 @@ def _apply_snapshot_and_events(
     blocked_ccys = _blocked_ccy_set(db, acc.id)
 
     for pid, row in new_map.items():
+        if _pid_manually_closed(db, acc.id, pid):
+            continue
         ccy = str(row.get("posCcy", "")).strip().upper()
         if ccy and ccy in blocked_ccys:
-            # 已手动关闭跟单的币种：若检测到仓位，强制走平仓链路（含手动买入场景）。
-            sid = _create_sim_open(db, acc, row, pid, open_ev=None)
-            if sid is not None:
-                _close_sim_at_exit(db, acc, pid, row, None, close_intents)
+            # 已手动关闭跟单的币种：跳过自动开仓/补单，不自动平仓。
             continue
         if pid not in old_map:
             ev = FollowPositionEvent(

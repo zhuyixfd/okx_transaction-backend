@@ -60,6 +60,12 @@ class SnapshotFollowBody(BaseModel):
     pos_id: str = Field(..., min_length=1, max_length=64)
 
 
+class SnapshotFollowSideBody(BaseModel):
+    unique_name: str = Field(..., min_length=1, max_length=128)
+    pos_ccy: str = Field(..., min_length=1, max_length=32)
+    pos_side: str = Field(..., pattern="^(long|short)$")
+
+
 def _upl_ratio_from_detail_json(detail_json: str | None) -> str | None:
     if not detail_json or not str(detail_json).strip():
         return None
@@ -1406,6 +1412,110 @@ async def snapshot_follow_stop_once(
 
     db.commit()
     return {"ok": True, "sim_record_id": target_rec_id}
+
+
+@router.post("/snapshot-follow-side-stop")
+async def snapshot_follow_side_stop_once(
+    body: SnapshotFollowSideBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    """按币种+方向关闭跟单（不自动平仓）。"""
+    ensure_mysql_db_configured()
+    un = body.unique_name.strip()
+    ccy = body.pos_ccy.strip().upper()
+    side = body.pos_side.strip().lower()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    pid = f"__side_block__:{ccy}:{side}"
+    now = now_cn()
+    rec = FollowSimRecord(
+        follow_account_id=acc.id,
+        pos_id=pid,
+        pos_ccy=ccy,
+        pos_side=side,
+        entry_avg_px=None,
+        stake_usdt=Decimal(0),
+        status="closed",
+        open_event_id=None,
+        close_event_id=None,
+        exit_px=None,
+        realized_pnl_usdt=Decimal(0),
+        unrealized_pnl_usdt=Decimal(0),
+        last_mark_px=None,
+        src_pos=None,
+        src_margin=None,
+        src_mgn_ratio=None,
+        src_liq_px=None,
+        add_position_count=0,
+        reduce_position_count=0,
+        add_margin_count=0,
+        total_invested_usdt=Decimal(0),
+        live_open_ok=False,
+        live_close_ok=True,
+        opened_at=now,
+        closed_at=now,
+        updated_at=now,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return {"ok": True, "sim_record_id": rec.id}
+
+
+@router.post("/snapshot-follow-side-enable")
+async def snapshot_follow_side_enable_once(
+    body: SnapshotFollowSideBody,
+    db: Session = Depends(get_db),
+) -> dict:
+    """按币种+方向恢复跟单。"""
+    ensure_mysql_db_configured()
+    un = body.unique_name.strip()
+    ccy = body.pos_ccy.strip().upper()
+    side = body.pos_side.strip().lower()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+    pid = f"__side_block__:{ccy}:{side}"
+    now = now_cn()
+    rec = FollowSimRecord(
+        follow_account_id=acc.id,
+        pos_id=pid,
+        pos_ccy=ccy,
+        pos_side=side,
+        entry_avg_px=None,
+        stake_usdt=Decimal(0),
+        status="open",
+        open_event_id=None,
+        close_event_id=None,
+        exit_px=None,
+        realized_pnl_usdt=None,
+        unrealized_pnl_usdt=Decimal(0),
+        last_mark_px=None,
+        src_pos=None,
+        src_margin=None,
+        src_mgn_ratio=None,
+        src_liq_px=None,
+        add_position_count=0,
+        reduce_position_count=0,
+        add_margin_count=0,
+        total_invested_usdt=Decimal(0),
+        live_open_ok=True,
+        live_close_ok=None,
+        opened_at=now,
+        closed_at=None,
+        updated_at=now,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return {"ok": True, "sim_record_id": rec.id}
 
 
 @router.patch("/{account_id}/okx-bind", response_model=FollowAccountOut)

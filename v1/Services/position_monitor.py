@@ -430,6 +430,30 @@ def _pid_manually_closed(db: Session, acc_id: int, pid: str) -> bool:
     return bool(rec is not None and rec.status == "closed" and rec.live_close_ok is True)
 
 
+def _side_block_pid(ccy: str, side: str) -> str:
+    return f"__side_block__:{ccy.strip().upper()}:{side.strip().lower()}"
+
+
+def _is_ccy_side_manually_blocked(db: Session, acc_id: int, ccy: str, side: str) -> bool:
+    s = side.strip().lower()
+    if s not in ("long", "short"):
+        return False
+    pid = _side_block_pid(ccy, s)
+    rec = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(
+                FollowSimRecord.follow_account_id == acc_id,
+                FollowSimRecord.pos_id == pid,
+            )
+            .order_by(FollowSimRecord.id.desc())
+            .limit(1)
+        )
+        .scalar_one_or_none()
+    )
+    return bool(rec is not None and rec.status == "closed" and rec.live_close_ok is True)
+
+
 def _reconcile_sim_follow_set(
     db: Session,
     acc: FollowAccount,
@@ -468,6 +492,10 @@ def _reconcile_sim_follow_set(
             continue
         new_row = new_map.get(pid)
         if not isinstance(new_row, dict):
+            continue
+        ccy = str(new_row.get("posCcy", "")).strip().upper()
+        side = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
+        if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         ps = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
@@ -509,6 +537,10 @@ def _reconcile_sim_follow_set(
         if pid in skip_open_pids:
             continue
         if _pid_manually_closed(db, acc_id, pid):
+            continue
+        ccy = str(new_map[pid].get("posCcy", "")).strip().upper()
+        side = str(new_map[pid].get("posSide", "")).strip().lower()
+        if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
             continue
         if _same_source_position_recently_closed(db, acc_id, pid, new_map[pid]):
             continue
@@ -585,6 +617,10 @@ def _apply_snapshot_and_events(
     open_branch_handled_pids: set[str] = set()
     for pid, row in new_map.items():
         if _pid_manually_closed(db, acc.id, pid):
+            continue
+        ccy = str(row.get("posCcy", "")).strip().upper()
+        side = str(row.get("posSide", "")).strip().lower()
+        if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
             continue
         if pid not in old_map:
             ev = FollowPositionEvent(

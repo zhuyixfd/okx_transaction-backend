@@ -152,6 +152,35 @@ def _is_pos_manually_blocked(follow_account_id: int, pos_id: str) -> bool:
         db.close()
 
 
+def _side_block_pid(ccy: str, side: str) -> str:
+    return f"__side_block__:{ccy.strip().upper()}:{side.strip().lower()}"
+
+
+def _is_ccy_side_manually_blocked(follow_account_id: int, inst_id: str, side: str) -> bool:
+    base = (inst_id or "").strip().upper().split("-")[0]
+    s = (side or "").strip().lower()
+    if not base or s not in ("long", "short"):
+        return False
+    pid = _side_block_pid(base, s)
+    db = SessionLocal()
+    try:
+        rec = (
+            db.execute(
+                select(FollowSimRecord)
+                .where(
+                    FollowSimRecord.follow_account_id == follow_account_id,
+                    FollowSimRecord.pos_id == pid,
+                )
+                .order_by(FollowSimRecord.id.desc())
+                .limit(1)
+            )
+            .scalar_one_or_none()
+        )
+        return bool(rec is not None and rec.status == "closed" and rec.live_close_ok is True)
+    finally:
+        db.close()
+
+
 async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
     db = SessionLocal()
     try:
@@ -193,6 +222,13 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
             print(
                 f"[live_follow] open skip manually_blocked sim_id={intent.sim_record_id} "
                 f"pos_id={intent.pos_id!r}"
+            )
+            _set_live_open_ok(intent.sim_record_id, False)
+            return
+        if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
+            print(
+                f"[live_follow] open skip manually_blocked_side sim_id={intent.sim_record_id} "
+                f"inst={intent.inst_id} side={intent.pos_side}"
             )
             _set_live_open_ok(intent.sim_record_id, False)
             return

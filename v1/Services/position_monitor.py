@@ -455,7 +455,8 @@ def _reconcile_sim_follow_set(
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
-        ps = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
+        # 调仓方向应以“对方当前持仓方向”为准，避免沿用历史方向导致先减后加的反向动作。
+        ps = (str(new_row.get("posSide", "")).strip() or (rec.pos_side or "")).lower()
         if not inst_id or ps not in ("long", "short") or acc.okx_api_account_id is None:
             continue
         lever_s = str(new_row.get("lever", "")).strip() or None

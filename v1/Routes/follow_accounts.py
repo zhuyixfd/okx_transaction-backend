@@ -238,9 +238,7 @@ async def follow_diagnose(
             rs.append("invalid_pos_id")
         if not ccy:
             rs.append("invalid_pos_ccy")
-        if side_raw == "net":
-            rs.append("net_position_not_follow")
-        elif side not in ("long", "short"):
+        if side not in ("long", "short"):
             rs.append("invalid_pos_side")
         if pid and pid not in selected_pids:
             rs.append("out_of_max_follow_positions")

@@ -124,6 +124,14 @@ def _is_net_pos_side(raw_side: object) -> bool:
     return str(raw_side or "").strip().lower() == "net"
 
 
+def _effective_follow_side(row: dict[str, Any]) -> str:
+    raw = str(row.get("posSide", "")).strip().lower()
+    if raw in ("long", "short"):
+        return raw
+    inferred = str(row.get("posSideInferred", "")).strip().lower()
+    return inferred if inferred in ("long", "short") else ""
+
+
 def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
     lev = str(p.get("lever", "")).strip()
     if not lev:
@@ -142,6 +150,7 @@ def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
         "cTime_format": str(p.get("cTime_format", "")),
         "posCcy": str(p.get("posCcy", "")),
         "posSide": str(p.get("posSide", "")),
+        "posSideInferred": str(p.get("posSideInferred", "")),
         "lever": lev,
         "avgPx": str(p.get("avgPx", "")),
         "last": str(p.get("last", "")),
@@ -256,7 +265,7 @@ def _append_live_follow_open_intent(
     ccy = (row.get("posCcy") or "").strip()
     if not ccy:
         return
-    ps = (row.get("posSide") or "").strip().lower()
+    ps = _effective_follow_side(row)
     if ps not in ("long", "short"):
         return
     coeff = (
@@ -309,7 +318,7 @@ def _create_sim_open(
     )
     mark = row.get("last") or "0"
     entry = row.get("avgPx") or "0"
-    side = row.get("posSide")
+    side = _effective_follow_side(row) or row.get("posSide")
     ur = _sim_pnl_usdt(stake, str(entry) if entry else None, str(mark) if mark else None, side)
     now = now_cn()
     sp, sm, smr, slx = _row_src_metrics(row)
@@ -484,7 +493,7 @@ def _reconcile_sim_follow_set(
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         # 调仓方向应以“对方当前持仓方向”为准，避免沿用历史方向导致先减后加的反向动作。
-        ps = (str(new_row.get("posSide", "")).strip() or (rec.pos_side or "")).lower()
+        ps = _effective_follow_side(new_row) or (rec.pos_side or "").lower()
         if not inst_id or ps not in ("long", "short") or acc.okx_api_account_id is None:
             continue
         lever_s = str(new_row.get("lever", "")).strip() or None
@@ -523,7 +532,7 @@ def _reconcile_sim_follow_set(
         if pid in skip_open_pids:
             continue
         ccy = str(new_map[pid].get("posCcy", "")).strip().upper()
-        side = str(new_map[pid].get("posSide", "")).strip().lower()
+        side = _effective_follow_side(new_map[pid])
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
             _log_not_follow_reason(
                 follow_id=acc.id,
@@ -609,18 +618,18 @@ def _apply_snapshot_and_events(
         pid = str(p.get("posId", "")).strip()
         if not pid:
             return False
-        if _is_net_pos_side(p.get("posSide")):
+        side = _effective_follow_side(p)
+        if side not in ("long", "short"):
             _log_not_follow_reason(
                 follow_id=acc.id,
                 unique_name=acc.unique_name,
                 pos_id=pid,
                 pos_ccy=str(p.get("posCcy", "")).strip().upper() or None,
-                pos_side="net",
-                reason="net_position_not_follow",
+                pos_side=str(p.get("posSide", "")).strip().lower() or None,
+                reason="invalid_or_uninferred_pos_side",
             )
             return False
         ccy = str(p.get("posCcy", "")).strip().upper()
-        side = str(p.get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
             _log_not_follow_reason(
                 follow_id=acc.id,
@@ -640,15 +649,15 @@ def _apply_snapshot_and_events(
     )
     for pid, row in new_map.items():
         ccy = str(row.get("posCcy", "")).strip().upper()
-        side = str(row.get("posSide", "")).strip().lower()
-        if side == "net":
+        side = _effective_follow_side(row)
+        if side not in ("long", "short"):
             _log_not_follow_reason(
                 follow_id=acc.id,
                 unique_name=acc.unique_name,
                 pos_id=pid,
                 pos_ccy=ccy or None,
-                pos_side="net",
-                reason="net_position_not_follow",
+                pos_side=str(row.get("posSide", "")).strip().lower() or None,
+                reason="invalid_or_uninferred_pos_side",
             )
             continue
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):

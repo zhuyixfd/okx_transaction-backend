@@ -32,22 +32,29 @@ TRADE_ACTION_DEBOUNCE_SEC = 3.0
 
 _live_open_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 """(okx_api_accounts.id, instId 大写, pos_side long|short) 下同进程串行开仓。"""
-_live_adjust_last_ts: dict[tuple[int, str, str], float] = {}
+_live_trade_success_last_ts: dict[tuple[int, str, str], float] = {}
 
 
-def _debounced_trade_action(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> bool:
+def _trade_action_cooldown_hit(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> bool:
     """
-    同币种同方向 3 秒内只允许一次“加/减/平”动作。
-    返回 True 表示命中防抖，应跳过本次执行。
+    同币种同方向 3 秒内只允许一次“加/减/平”成功动作。
+    返回 True 表示仍在冷却中，应跳过本次执行。
     """
     side = (pos_side or "net").strip().lower()
     key = (okx_api_account_id, inst_id.strip().upper(), side)
     now_ts = time.monotonic()
-    last_ts = _live_adjust_last_ts.get(key, 0.0)
+    last_ts = _live_trade_success_last_ts.get(key, 0.0)
     if (now_ts - last_ts) < TRADE_ACTION_DEBOUNCE_SEC:
         return True
-    _live_adjust_last_ts[key] = now_ts
     return False
+
+
+def _mark_trade_action_success(
+    okx_api_account_id: int, inst_id: str, pos_side: str | None
+) -> None:
+    side = (pos_side or "net").strip().lower()
+    key = (okx_api_account_id, inst_id.strip().upper(), side)
+    _live_trade_success_last_ts[key] = time.monotonic()
 
 
 def _get_live_open_lock(key: tuple[int, str, str]) -> asyncio.Lock:
@@ -379,7 +386,11 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
     else:
         api_pos_side = None
 
-    if _debounced_trade_action(intent.okx_api_account_id, intent.inst_id, api_pos_side):
+    if _trade_action_cooldown_hit(intent.okx_api_account_id, intent.inst_id, api_pos_side):
+        print(
+            f"[live_follow] close skip debounce follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
+        )
         return
 
     ok_cp, data = await client.close_swap_position(
@@ -396,6 +407,7 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
         f"[live_follow] close ok follow_id={intent.follow_account_id} "
         f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
     )
+    _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, api_pos_side)
     _set_live_close_ok(intent.sim_record_id, True)
 
 
@@ -414,7 +426,7 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
             f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
         )
         return
-    if _debounced_trade_action(intent.okx_api_account_id, intent.inst_id, intent.pos_side):
+    if _trade_action_cooldown_hit(intent.okx_api_account_id, intent.inst_id, intent.pos_side):
         print(
             f"[live_follow] adjust skip debounce follow_id={intent.follow_account_id} "
             f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
@@ -528,6 +540,7 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
         f"action={intent.action} target={contracts} cur={format(cur, 'f')} place={place_contracts}"
     )
+    _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, intent.pos_side)
 
 
 async def run_live_follow_intents(

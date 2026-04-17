@@ -412,19 +412,25 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     ok_pos, pos_data = await client.get_positions_inst("SWAP")
     if not ok_pos or not isinstance(pos_data, dict):
         return
-    target_row: dict | None = None
+    cur = Decimal("0")
     for row in pos_data.get("data") or []:
         if not isinstance(row, dict):
             continue
-        if not _okx_swap_row_matches_follow_open(
-            row,
-            inst_id=intent.inst_id,
-            want_side=intent.pos_side,
-            hedge_mode=hedge_mode,
-        ):
+        if (row.get("instId") or "").strip().upper() != intent.inst_id.strip().upper():
             continue
-        target_row = row
-        break
+        c = _dec(row.get("pos"))
+        if c is None or abs(c) < Decimal("1e-12"):
+            continue
+        if hedge_mode:
+            row_side = (row.get("posSide") or "").strip().lower()
+            if row_side != intent.pos_side:
+                continue
+            cur += abs(c)
+        else:
+            if intent.pos_side == "long" and c > 0:
+                cur += abs(c)
+            elif intent.pos_side == "short" and c < 0:
+                cur += abs(c)
     contracts = intent.contracts.strip()
     if not contracts:
         return
@@ -435,11 +441,6 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         want = _dec(contracts)
         if want is None or want <= 0:
             return
-        cur = Decimal("0")
-        if target_row is not None:
-            c = _dec(target_row.get("pos"))
-            if c is not None:
-                cur = abs(c)
         diff = want - cur
         if abs(diff) < Decimal("1e-12"):
             return

@@ -131,19 +131,8 @@ def _set_live_close_ok(sim_id: int, value: bool) -> None:
         db.close()
 
 
-def _inst_base_ccy(inst_id: str) -> str:
-    s = str(inst_id or "").strip().upper()
-    if not s:
-        return ""
-    i = s.find("-")
-    return s[:i] if i > 0 else s
-
-
-def _is_ccy_manually_blocked(follow_account_id: int, inst_id: str) -> bool:
-    """该币种最新记录若为 closed 且 live_close_ok=True，则视为手动关闭该币跟单。"""
-    ccy = _inst_base_ccy(inst_id)
-    if not ccy:
-        return False
+def _is_pos_manually_blocked(follow_account_id: int, pos_id: str) -> bool:
+    """该 pos_id 最新记录若为 closed 且 live_close_ok=True，则视为手动关闭跟单。"""
     db = SessionLocal()
     try:
         rec = (
@@ -151,7 +140,7 @@ def _is_ccy_manually_blocked(follow_account_id: int, inst_id: str) -> bool:
                 select(FollowSimRecord)
                 .where(
                     FollowSimRecord.follow_account_id == follow_account_id,
-                    FollowSimRecord.pos_ccy == ccy,
+                    FollowSimRecord.pos_id == pos_id,
                 )
                 .order_by(FollowSimRecord.id.desc())
                 .limit(1)
@@ -200,10 +189,10 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
     )
     lock = _get_live_open_lock(lock_key)
     async with lock:
-        if _is_ccy_manually_blocked(intent.follow_account_id, intent.inst_id):
+        if _is_pos_manually_blocked(intent.follow_account_id, intent.pos_id):
             print(
-                f"[live_follow] open skip manually_blocked_ccy sim_id={intent.sim_record_id} "
-                f"inst={intent.inst_id}"
+                f"[live_follow] open skip manually_blocked sim_id={intent.sim_record_id} "
+                f"pos_id={intent.pos_id!r}"
             )
             _set_live_open_ok(intent.sim_record_id, False)
             return

@@ -48,6 +48,32 @@ def _fmt_upl_usdt(pos: dict) -> str:
         return str(v).strip()
 
 
+def _infer_side_for_net_position(pos: dict) -> str | None:
+    """
+    全仓(net)方向推断（仅用于展示/诊断，不用于跟单）：
+    依据「标记价-开仓价」与「收益额 upl」符号组合：
+    1) (last-avg)>0 且 upl>0 -> long
+    2) (last-avg)>0 且 upl<0 -> short
+    3) (last-avg)<0 且 upl>0 -> short
+    4) (last-avg)<0 且 upl<0 -> long
+    """
+    try:
+        last = float(str(pos.get("last", "")).strip() or "0")
+        avg = float(str(pos.get("avgPx", "")).strip() or "0")
+        upl = float(str(pos.get("upl", "")).strip() or "0")
+    except (TypeError, ValueError):
+        return None
+    d = last - avg
+    if abs(d) < 1e-12 or abs(upl) < 1e-12:
+        return None
+    prod = d * upl
+    if prod > 0:
+        return "long"
+    if prod < 0:
+        return "short"
+    return None
+
+
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -241,6 +267,14 @@ class OkxTrade:
         if len(posData) == 0:
             return res
         for pos in posData:
+            raw_side = str(pos.get("posSide", "")).strip().lower()
+            if raw_side in ("long", "short"):
+                norm_side = raw_side
+                inferred_side = raw_side
+            else:
+                # net 视为全仓：不参与跟单，仅保留推断方向用于展示/排查。
+                norm_side = "net"
+                inferred_side = _infer_side_for_net_position(pos)
             res.append({
                 'posId': pos["posId"],
                 "cTime": pos["cTime"],
@@ -253,7 +287,8 @@ class OkxTrade:
                 "margin": pos.get("margin", ""),
                 "liqPx": pos.get("liqPx", ""),
                 "posCcy": pos["posCcy"],
-                "posSide": pos["posSide"],
+                "posSide": norm_side,
+                "posSideInferred": inferred_side,
                 "lever": pick_lever_from_pos(pos),
                 "avgPx": pos.get("avgPx"),
                 "last": pos.get("last"),

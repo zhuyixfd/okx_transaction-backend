@@ -414,6 +414,8 @@ def _dec(raw: object) -> Decimal | None:
 
 
 async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
+    if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
+        return
     db = SessionLocal()
     try:
         cred = db.get(OkxApiAccount, intent.okx_api_account_id)

@@ -120,6 +120,10 @@ def _sim_eligible_pos_ids(
     return _sim_eligible_from_unique(_unique_positions_by_pos_id(positions), max_n)
 
 
+def _is_net_pos_side(raw_side: object) -> bool:
+    return str(raw_side or "").strip().lower() == "net"
+
+
 def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
     lev = str(p.get("lever", "")).strip()
     if not lev:
@@ -605,6 +609,16 @@ def _apply_snapshot_and_events(
         pid = str(p.get("posId", "")).strip()
         if not pid:
             return False
+        if _is_net_pos_side(p.get("posSide")):
+            _log_not_follow_reason(
+                follow_id=acc.id,
+                unique_name=acc.unique_name,
+                pos_id=pid,
+                pos_ccy=str(p.get("posCcy", "")).strip().upper() or None,
+                pos_side="net",
+                reason="net_position_not_follow",
+            )
+            return False
         ccy = str(p.get("posCcy", "")).strip().upper()
         side = str(p.get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
@@ -627,6 +641,16 @@ def _apply_snapshot_and_events(
     for pid, row in new_map.items():
         ccy = str(row.get("posCcy", "")).strip().upper()
         side = str(row.get("posSide", "")).strip().lower()
+        if side == "net":
+            _log_not_follow_reason(
+                follow_id=acc.id,
+                unique_name=acc.unique_name,
+                pos_id=pid,
+                pos_ccy=ccy or None,
+                pos_side="net",
+                reason="net_position_not_follow",
+            )
+            continue
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
             _log_not_follow_reason(
                 follow_id=acc.id,

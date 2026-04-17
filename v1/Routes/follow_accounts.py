@@ -79,6 +79,40 @@ def _snapshot_ct_key(row: dict) -> tuple[int, str]:
     return (ct_i, str(row.get("posId", "")))
 
 
+def _to_decimal_safe(raw: object) -> Decimal | None:
+    try:
+        s = str(raw).strip()
+        if not s:
+            return None
+        return Decimal(s)
+    except Exception:
+        return None
+
+
+def _infer_net_side_display(
+    *,
+    raw_side: str,
+    avg_px_raw: object,
+    mark_px_raw: object,
+    upl_raw: object,
+) -> str:
+    side = (raw_side or "").strip().lower()
+    if side in ("long", "short"):
+        return side
+    if side != "net":
+        return side
+    avg_px = _to_decimal_safe(avg_px_raw)
+    mark_px = _to_decimal_safe(mark_px_raw)
+    upl = _to_decimal_safe(upl_raw)
+    if avg_px is None or mark_px is None or upl is None:
+        return side
+    diff = mark_px - avg_px
+    if diff == 0 or upl == 0:
+        return side
+    # 规则：同号=做多，异号=做空。
+    return "long" if ((diff > 0) == (upl > 0)) else "short"
+
+
 @router.get("/follow-diagnose")
 async def follow_diagnose(
     unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
@@ -190,7 +224,13 @@ async def follow_diagnose(
     for r in rows:
         pid = str(r.get("posId", "")).strip()
         ccy = str(r.get("posCcy", "")).strip().upper()
-        side = str(r.get("posSide", "")).strip().lower()
+        side_raw = str(r.get("posSide", "")).strip().lower()
+        side = _infer_net_side_display(
+            raw_side=side_raw,
+            avg_px_raw=r.get("avgPx"),
+            mark_px_raw=r.get("last"),
+            upl_raw=r.get("upl"),
+        )
         inst_id = normalize_swap_inst_id(ccy) if ccy else ""
         rs = list(reasons_global)
 
@@ -198,7 +238,9 @@ async def follow_diagnose(
             rs.append("invalid_pos_id")
         if not ccy:
             rs.append("invalid_pos_ccy")
-        if side not in ("long", "short"):
+        if side_raw == "net":
+            rs.append("net_position_not_follow")
+        elif side not in ("long", "short"):
             rs.append("invalid_pos_side")
         if pid and pid not in selected_pids:
             rs.append("out_of_max_follow_positions")
@@ -458,12 +500,19 @@ def _snapshot_row_to_item(row: dict) -> PositionSnapshotItem:
     upl_s = None if ur is None else (str(ur).strip() or None)
     uu = row.get("upl")
     upl_usdt = None if uu is None else (str(uu).strip() or None)
+    pos_side_raw = row.get("posSide")
+    pos_side_out = _infer_net_side_display(
+        raw_side="" if pos_side_raw is None else str(pos_side_raw),
+        avg_px_raw=row.get("avgPx"),
+        mark_px_raw=row.get("last"),
+        upl_raw=row.get("upl"),
+    )
     return PositionSnapshotItem(
         pos_id=str(row.get("posId", "")),
         c_time=row.get("cTime"),
         c_time_format=row.get("cTime_format"),
         pos_ccy=row.get("posCcy"),
-        pos_side=row.get("posSide"),
+        pos_side=pos_side_out or None,
         lever=row.get("lever"),
         avg_px=row.get("avgPx"),
         last_px=row.get("last"),

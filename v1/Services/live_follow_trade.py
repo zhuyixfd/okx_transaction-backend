@@ -496,5 +496,14 @@ async def run_live_follow_intents(
             continue
         seen_open.add(key)
         await execute_live_follow_open(it)
+    # 同一轮内同一交易员+合约+方向仅保留一条调仓 intent，避免多条 rebalance 互相打架导致仓位抖动。
+    merged_adjust: dict[tuple[int, str, str], LiveFollowAdjustIntent] = {}
     for it in (adjust_intents or []):
+        key = (
+            it.follow_account_id,
+            it.inst_id.strip().upper(),
+            it.pos_side.strip().lower(),
+        )
+        merged_adjust[key] = it
+    for it in merged_adjust.values():
         await execute_live_follow_adjust(it)

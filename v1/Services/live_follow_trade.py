@@ -35,6 +35,26 @@ _live_open_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 _live_trade_success_last_ts: dict[tuple[int, str, str], float] = {}
 
 
+def _summarize_order_error(payload: object) -> str:
+    if not isinstance(payload, dict):
+        s = str(payload)
+        return s[:1000]
+    code = str(payload.get("code", "")).strip()
+    msg = str(payload.get("msg", "")).strip()
+    data = payload.get("data")
+    detail = ""
+    if isinstance(data, list) and data:
+        first = data[0]
+        if isinstance(first, dict):
+            sc = str(first.get("sCode", "")).strip()
+            sm = str(first.get("sMsg", "")).strip()
+            if sc or sm:
+                detail = f"sCode={sc} sMsg={sm}".strip()
+    parts = [p for p in (f"code={code}" if code else "", f"msg={msg}" if msg else "", detail) if p]
+    out = " | ".join(parts) if parts else str(payload)
+    return out[:1000]
+
+
 def _trade_action_cooldown_hit(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> bool:
     """
     同币种同方向 3 秒内只允许一次“加/减/平”成功动作。
@@ -145,6 +165,18 @@ def _set_live_open_ok(sim_id: int, value: bool) -> None:
         db.close()
 
 
+def _set_live_last_error(sim_id: int, value: str | None) -> None:
+    db = SessionLocal()
+    try:
+        r = db.get(FollowSimRecord, sim_id)
+        if r:
+            r.live_last_error = value[:1000] if value else None
+            r.updated_at = now_cn()
+            db.commit()
+    finally:
+        db.close()
+
+
 def _set_live_close_ok(sim_id: int, value: bool) -> None:
     db = SessionLocal()
     try:
@@ -201,6 +233,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                 f"pos_id={intent.pos_id!r}"
             )
             _set_live_open_ok(intent.sim_record_id, False)
+            _set_live_last_error(intent.sim_record_id, "open skip: no okx credential")
             return
         client = okx_client_for_db_secrets(cred.api_key, cred.api_secret, cred.api_passphrase)
         if not client.is_configured():
@@ -209,6 +242,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                 f"sim_id={intent.sim_record_id}"
             )
             _set_live_open_ok(intent.sim_record_id, False)
+            _set_live_last_error(intent.sim_record_id, "open skip: unconfigured okx api")
             return
     finally:
         db.close()
@@ -247,6 +281,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
         if blocked:
             print(f"[live_follow] open skip sim_id={intent.sim_record_id}: {blocked}")
             _set_live_open_ok(intent.sim_record_id, False)
+            _set_live_last_error(intent.sim_record_id, f"open skip: {blocked}")
             return
         td_mode = LIVE_FOLLOW_TD_MODE
         hedge_mode = cfg_pos_mode != "net_mode"
@@ -278,6 +313,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                     f"{pm_data!r}"
                 )
                 _set_live_open_ok(intent.sim_record_id, False)
+                _set_live_last_error(intent.sim_record_id, _summarize_order_error(pm_data))
                 return
 
         sizing_lever: int
@@ -290,10 +326,12 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                     f"{intent.lever_str!r}"
                 )
                 _set_live_open_ok(intent.sim_record_id, False)
+                _set_live_last_error(intent.sim_record_id, "open fail: invalid lever")
                 return
             if not (1 <= lv <= 125):
                 print(f"[live_follow] open lever OOB sim_id={intent.sim_record_id}: {lv}")
                 _set_live_open_ok(intent.sim_record_id, False)
+                _set_live_last_error(intent.sim_record_id, "open fail: lever out of range")
                 return
             sizing_lever = lv
             lev_pos: str | None = pos_side if hedge_mode else None
@@ -306,6 +344,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                     f"{lev_data!r}"
                 )
                 _set_live_open_ok(intent.sim_record_id, False)
+                _set_live_last_error(intent.sim_record_id, _summarize_order_error(lev_data))
                 return
         else:
             ok_li, li_data = await client.get_leverage_info(inst_id, td_mode)
@@ -315,6 +354,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                     f"{li_data!r}"
                 )
                 _set_live_open_ok(intent.sim_record_id, False)
+                _set_live_last_error(intent.sim_record_id, _summarize_order_error(li_data))
                 return
             picked = sizing_lever_from_leverage_info(
                 li_data, hedge_mode=hedge_mode, pos_side=pos_side
@@ -324,6 +364,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                     f"[live_follow] open no lever sim_id={intent.sim_record_id} inst={inst_id}"
                 )
                 _set_live_open_ok(intent.sim_record_id, False)
+                _set_live_last_error(intent.sim_record_id, "open fail: no leverage available")
                 return
             sizing_lever = picked
 
@@ -341,12 +382,14 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
                 f"pos_id={intent.pos_id!r}: {payload!r}"
             )
             _set_live_open_ok(intent.sim_record_id, False)
+            _set_live_last_error(intent.sim_record_id, _summarize_order_error(payload))
             return
         print(
             f"[live_follow] open ok follow_id={intent.follow_account_id} pos_id={intent.pos_id!r} "
             f"inst={inst_id} side={pos_side}"
         )
         _set_live_open_ok(intent.sim_record_id, True)
+        _set_live_last_error(intent.sim_record_id, None)
 
 
 async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
@@ -359,10 +402,12 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
                 f"inst={intent.inst_id}"
             )
             _set_live_close_ok(intent.sim_record_id, False)
+            _set_live_last_error(intent.sim_record_id, "close skip: no okx credential")
             return
         client = okx_client_for_db_secrets(cred.api_key, cred.api_secret, cred.api_passphrase)
         if not client.is_configured():
             _set_live_close_ok(intent.sim_record_id, False)
+            _set_live_last_error(intent.sim_record_id, "close skip: unconfigured okx api")
             return
     finally:
         db.close()
@@ -375,6 +420,7 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
     if blocked:
         print(f"[live_follow] close skip sim_id={intent.sim_record_id}: {blocked}")
         _set_live_close_ok(intent.sim_record_id, False)
+        _set_live_last_error(intent.sim_record_id, f"close skip: {blocked}")
         return
     td_mode = LIVE_FOLLOW_TD_MODE
     hedge_mode = cfg_pos_mode != "net_mode"
@@ -402,6 +448,7 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
             f"sim_id={intent.sim_record_id} inst={intent.inst_id}: {data!r}"
         )
         _set_live_close_ok(intent.sim_record_id, False)
+        _set_live_last_error(intent.sim_record_id, _summarize_order_error(data))
         return
     print(
         f"[live_follow] close ok follow_id={intent.follow_account_id} "
@@ -409,6 +456,7 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
     )
     _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, api_pos_side)
     _set_live_close_ok(intent.sim_record_id, True)
+    _set_live_last_error(intent.sim_record_id, None)
 
 
 def _dec(raw: object) -> Decimal | None:
@@ -521,7 +569,7 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         side = "buy" if intent.pos_side == "long" else "sell"
     else:
         side = "sell" if intent.pos_side == "long" else "buy"
-    ok_order, _ = await client.place_swap_market_by_sz(
+    ok_order, order_payload = await client.place_swap_market_by_sz(
         intent.inst_id,
         place_contracts,
         td_mode=td_mode,
@@ -532,8 +580,10 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         print(
             f"[live_follow] adjust fail follow_id={intent.follow_account_id} "
             f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
-            f"action={intent.action} place_side={side} place_contracts={place_contracts}"
+            f"action={intent.action} place_side={side} place_contracts={place_contracts} "
+            f"payload={order_payload!r}"
         )
+        _set_live_last_error(intent.sim_record_id, _summarize_order_error(order_payload))
         return
     print(
         f"[live_follow] adjust ok follow_id={intent.follow_account_id} "
@@ -541,6 +591,7 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         f"action={intent.action} target={contracts} cur={format(cur, 'f')} place={place_contracts}"
     )
     _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, intent.pos_side)
+    _set_live_last_error(intent.sim_record_id, None)
 
 
 async def run_live_follow_intents(

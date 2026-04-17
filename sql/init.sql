@@ -123,6 +123,7 @@ CREATE TABLE `follow_sim_records` (
   `total_invested_usdt` DECIMAL(24,8) NOT NULL DEFAULT 0.00000000,
   `live_open_ok` TINYINT(1) NULL DEFAULT NULL,
   `live_close_ok` TINYINT(1) NULL DEFAULT NULL,
+  `live_last_error` VARCHAR(1024) NULL,
   `opened_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `closed_at` TIMESTAMP(6) NULL DEFAULT NULL,
   `updated_at` TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
@@ -147,4 +148,5 @@ CREATE TABLE `follow_sim_records` (
 --   ADD COLUMN `src_liq_px` VARCHAR(64) NULL AFTER `src_mgn_ratio`;
 -- ALTER TABLE `follow_sim_records`
 --   ADD COLUMN `live_open_ok` TINYINT(1) NULL DEFAULT NULL AFTER `src_liq_px`,
---   ADD COLUMN `live_close_ok` TINYINT(1) NULL DEFAULT NULL AFTER `live_open_ok`;
+--   ADD COLUMN `live_close_ok` TINYINT(1) NULL DEFAULT NULL AFTER `live_open_ok`,
+--   ADD COLUMN `live_last_error` VARCHAR(1024) NULL AFTER `live_close_ok`;

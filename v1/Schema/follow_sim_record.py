@@ -34,6 +34,7 @@ class FollowSimRecordOut(BaseModel):
     reduce_position_count: int = Field(0, description="手动减仓次数")
     add_margin_count: int = Field(0, description="追加保证金次数")
     total_invested_usdt: Decimal = Field(..., description="累计投入（本金+加仓+追加保证金）")
+    live_last_error: Optional[str] = Field(None, description="最近一次真实下单失败原因")
     opened_at: datetime
     closed_at: Optional[datetime] = None
     updated_at: datetime

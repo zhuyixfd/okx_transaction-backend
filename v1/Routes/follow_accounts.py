@@ -881,6 +881,7 @@ def _sim_to_out(r: FollowSimRecord) -> FollowSimRecordOut:
         reduce_position_count=int(r.reduce_position_count or 0),
         add_margin_count=int(r.add_margin_count or 0),
         total_invested_usdt=Decimal(str(r.total_invested_usdt or 0)),
+        live_last_error=r.live_last_error,
         opened_at=r.opened_at,
         closed_at=r.closed_at,
         updated_at=r.updated_at,

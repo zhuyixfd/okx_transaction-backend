@@ -64,6 +64,8 @@ class FollowSimRecord(Base):
     # 真实跟单：NULL=未走私有下单或仅模拟；True/False=开仓/平仓 API 最终结果（平仓仅在开仓成功时触发）。
     live_open_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     live_close_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 最近一次真实下单失败原因（开/平/调仓），用于前端直接展示。
+    live_last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

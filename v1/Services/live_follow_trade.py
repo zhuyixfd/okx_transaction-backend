@@ -119,15 +119,18 @@ async def _acquire_trade_guard_lock_with_retry(
     retry_delay_sec: float = 0.2,
 ) -> SessionLocal | None:
     """
-    进程锁获取（带一次重试）：
-    - 第一次 timeout_sec
-    - 失败后等待 retry_delay_sec 再尝试一次
+    进程锁获取（异步轮询）：
+    - 每次用 GET_LOCK(..., 0) 非阻塞尝试，避免阻塞事件循环
+    - 在 timeout_sec 时间窗口内按 retry_delay_sec 重试
     """
-    db = _acquire_trade_guard_lock(okx_api_account_id, inst_id, pos_side, timeout_sec=timeout_sec)
-    if db is not None:
-        return db
-    await asyncio.sleep(retry_delay_sec)
-    return _acquire_trade_guard_lock(okx_api_account_id, inst_id, pos_side, timeout_sec=timeout_sec)
+    deadline = time.monotonic() + max(float(timeout_sec), 0.0)
+    while True:
+        db = _acquire_trade_guard_lock(okx_api_account_id, inst_id, pos_side, timeout_sec=0)
+        if db is not None:
+            return db
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(max(retry_delay_sec, 0.05))
 
 
 def _release_trade_guard_lock(

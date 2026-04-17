@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -75,6 +75,20 @@ def _sim_eligible_from_unique(
 
     sorted_pos = sorted(unique, key=_c_time_key)
     return {str(p["posId"]) for p in sorted_pos[:n]}
+
+
+def _sim_eligible_from_unique_filtered(
+    unique: list[dict[str, Any]],
+    max_n: int | None,
+    *,
+    include_predicate: Callable[[dict[str, Any]], bool],
+) -> set[str]:
+    """
+    先按 include_predicate 过滤，再按 cTime 升序取前 n 个。
+    避免 max_n 很小时，前位仓位被禁跟导致“一个都不跟”。
+    """
+    filtered = [p for p in unique if include_predicate(p)]
+    return _sim_eligible_from_unique(filtered, max_n)
 
 
 def _sim_eligible_pos_ids(
@@ -602,7 +616,6 @@ def _apply_snapshot_and_events(
 ) -> None:
     unique_rows = _unique_positions_by_pos_id(positions)
     new_map = {str(p["posId"]): _norm_row(p) for p in unique_rows if p.get("posId") is not None}
-    eligible = _sim_eligible_from_unique(unique_rows, acc.max_follow_positions)
     snap = db.get(FollowPositionSnapshot, acc.id)
     un = acc.unique_name or ""
 
@@ -615,6 +628,24 @@ def _apply_snapshot_and_events(
             old_map = {}
 
     open_branch_handled_pids: set[str] = set()
+
+    def _can_follow_row(p: dict[str, Any]) -> bool:
+        pid = str(p.get("posId", "")).strip()
+        if not pid:
+            return False
+        if _pid_manually_closed(db, acc.id, pid):
+            return False
+        ccy = str(p.get("posCcy", "")).strip().upper()
+        side = str(p.get("posSide", "")).strip().lower()
+        if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
+            return False
+        return True
+
+    eligible = _sim_eligible_from_unique_filtered(
+        unique_rows,
+        acc.max_follow_positions,
+        include_predicate=_can_follow_row,
+    )
     for pid, row in new_map.items():
         if _pid_manually_closed(db, acc.id, pid):
             continue

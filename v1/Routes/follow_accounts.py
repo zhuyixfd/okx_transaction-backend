@@ -66,6 +66,165 @@ class SnapshotFollowSideBody(BaseModel):
     pos_side: str = Field(..., pattern="^(long|short)$")
 
 
+def _side_block_pid(ccy: str, side: str) -> str:
+    return f"__side_block__:{ccy.strip().upper()}:{side.strip().lower()}"
+
+
+def _snapshot_ct_key(row: dict) -> tuple[int, str]:
+    ct = row.get("cTime")
+    try:
+        ct_i = int(ct) if ct is not None and str(ct).strip() != "" else 0
+    except (TypeError, ValueError):
+        ct_i = 0
+    return (ct_i, str(row.get("posId", "")))
+
+
+@router.get("/follow-diagnose")
+async def follow_diagnose(
+    unique_name: str = Query(..., min_length=1, max_length=128, description="跟单帐户 uniqueName"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """返回对方当前仓位逐条诊断：是否会跟、阻断原因。"""
+    ensure_mysql_db_configured()
+    un = unique_name.strip()
+    acc = (
+        db.execute(select(FollowAccount).where(FollowAccount.unique_name == un))
+        .scalar_one_or_none()
+    )
+    if acc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    reasons_global: list[str] = []
+    if not acc.enabled:
+        reasons_global.append("account_disabled")
+    if not bool(acc.live_trading_enabled):
+        reasons_global.append("live_trading_disabled")
+    if acc.okx_api_account_id is None:
+        reasons_global.append("okx_api_unbound")
+    coeff = Decimal(str(acc.open_by_asset_ratio_coeff or 0))
+    if coeff <= 0:
+        reasons_global.append("position_size_coeff_invalid")
+
+    snap = db.get(FollowPositionSnapshot, acc.id)
+    if snap is None:
+        return {
+            "unique_name": un,
+            "global_reasons": reasons_global + ["no_snapshot"],
+            "items": [],
+        }
+    try:
+        snap_map = json.loads(snap.snapshot_json)
+    except Exception:
+        snap_map = {}
+    if not isinstance(snap_map, dict):
+        snap_map = {}
+
+    rows = [r for r in snap_map.values() if isinstance(r, dict) and r.get("posId") is not None]
+    rows.sort(key=_snapshot_ct_key)
+
+    side_block_latest: dict[str, str] = {}
+    side_rows = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(
+                FollowSimRecord.follow_account_id == acc.id,
+                FollowSimRecord.pos_id.like("__side_block__:%"),
+            )
+            .order_by(FollowSimRecord.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    for r in side_rows:
+        pid = str(r.pos_id or "").strip()
+        if not pid.startswith("__side_block__:"):
+            continue
+        if pid not in side_block_latest:
+            side_block_latest[pid] = str(r.status or "").strip().lower()
+
+    max_n = acc.max_follow_positions
+    selected_pids: set[str] = set()
+    if max_n is None or int(max_n) <= 0:
+        selected_pids = {
+            str(r.get("posId", "")).strip()
+            for r in rows
+            if str(r.get("posId", "")).strip()
+        }
+    else:
+        for r in rows:
+            pid = str(r.get("posId", "")).strip()
+            if pid:
+                selected_pids.add(pid)
+            if len(selected_pids) >= int(max_n):
+                break
+
+    own_inst_side: set[tuple[str, str]] = set()
+    if acc.okx_api_account_id is not None:
+        try:
+            client = require_okx_client(db, acc.okx_api_account_id)
+            ok_cfg, cfg_data = await client.get_account_config()
+            _, cfg_pos_mode = parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+            hedge_mode = cfg_pos_mode != "net_mode"
+            ok_pos, pos_payload = await client.get_positions_inst("SWAP")
+            if ok_pos and isinstance(pos_payload, dict):
+                for p in pos_payload.get("data") or []:
+                    if not isinstance(p, dict):
+                        continue
+                    inst = str(p.get("instId", "")).strip().upper()
+                    try:
+                        pos_v = float(str(p.get("pos", "")).strip() or "0")
+                    except ValueError:
+                        pos_v = 0.0
+                    if not inst or abs(pos_v) < 1e-12:
+                        continue
+                    if hedge_mode:
+                        ps = str(p.get("posSide", "")).strip().lower()
+                        if ps in ("long", "short"):
+                            own_inst_side.add((inst, ps))
+                    else:
+                        own_inst_side.add((inst, "long" if pos_v > 0 else "short"))
+        except Exception:
+            pass
+
+    items: list[dict] = []
+    for r in rows:
+        pid = str(r.get("posId", "")).strip()
+        ccy = str(r.get("posCcy", "")).strip().upper()
+        side = str(r.get("posSide", "")).strip().lower()
+        inst_id = normalize_swap_inst_id(ccy) if ccy else ""
+        rs = list(reasons_global)
+
+        if not pid:
+            rs.append("invalid_pos_id")
+        if not ccy:
+            rs.append("invalid_pos_ccy")
+        if side not in ("long", "short"):
+            rs.append("invalid_pos_side")
+        if pid and pid not in selected_pids:
+            rs.append("out_of_max_follow_positions")
+        if ccy and side in ("long", "short"):
+            block_key = _side_block_pid(ccy, side)
+            if side_block_latest.get(block_key) == "closed":
+                rs.append("paused_by_side_config")
+        if inst_id and side in ("long", "short") and (inst_id, side) in own_inst_side:
+            rs.append("already_has_own_position_same_inst_side")
+        items.append(
+            {
+                "pos_id": pid,
+                "pos_ccy": ccy or None,
+                "pos_side": side or None,
+                "will_follow": len(rs) == 0,
+                "reasons": rs,
+            }
+        )
+
+    return {
+        "unique_name": un,
+        "global_reasons": reasons_global,
+        "items": items,
+    }
+
+
 def _upl_ratio_from_detail_json(detail_json: str | None) -> str | None:
     if not detail_json or not str(detail_json).strip():
         return None

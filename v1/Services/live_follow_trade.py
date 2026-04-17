@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -26,9 +27,12 @@ from v1.Services.okx_contract_helpers import (
 )
 
 LIVE_FOLLOW_TD_MODE = "isolated"
+REBALANCE_DEADBAND_CONTRACTS = Decimal("0.01")
+REBALANCE_COOLDOWN_SEC = 2.0
 
 _live_open_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 """(okx_api_accounts.id, instId 大写, pos_side long|short) 下同进程串行开仓。"""
+_live_adjust_last_ts: dict[tuple[int, str, str], float] = {}
 
 
 def _get_live_open_lock(key: tuple[int, str, str]) -> asyncio.Lock:
@@ -388,6 +392,15 @@ def _dec(raw: object) -> Decimal | None:
 async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
         return
+    adjust_key = (
+        intent.okx_api_account_id,
+        intent.inst_id.strip().upper(),
+        intent.pos_side.strip().lower(),
+    )
+    now_ts = time.monotonic()
+    last_ts = _live_adjust_last_ts.get(adjust_key, 0.0)
+    if (now_ts - last_ts) < REBALANCE_COOLDOWN_SEC:
+        return
     db = SessionLocal()
     try:
         cred = db.get(OkxApiAccount, intent.okx_api_account_id)
@@ -442,7 +455,7 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         if want is None or want <= 0:
             return
         diff = want - cur
-        if abs(diff) < Decimal("1e-12"):
+        if abs(diff) < REBALANCE_DEADBAND_CONTRACTS:
             return
         place_contracts = format(abs(diff), "f").rstrip("0").rstrip(".")
         if not place_contracts:
@@ -464,6 +477,7 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     )
     if not ok_order:
         return
+    _live_adjust_last_ts[adjust_key] = time.monotonic()
 
 
 async def run_live_follow_intents(

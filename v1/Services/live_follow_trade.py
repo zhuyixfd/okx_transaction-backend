@@ -318,138 +318,138 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
             return
         try:
             if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
-            print(
-                f"[live_follow] open skip manually_blocked_side sim_id={intent.sim_record_id} "
-                f"inst={intent.inst_id} side={intent.pos_side}"
-            )
-            _set_live_open_ok(intent.sim_record_id, False)
-            return
-
-        db_chk = SessionLocal()
-        try:
-            sim2 = db_chk.get(FollowSimRecord, intent.sim_record_id)
-            if sim2 is not None and sim2.live_open_ok is True:
+                print(
+                    f"[live_follow] open skip manually_blocked_side sim_id={intent.sim_record_id} "
+                    f"inst={intent.inst_id} side={intent.pos_side}"
+                )
+                _set_live_open_ok(intent.sim_record_id, False)
                 return
-        finally:
-            db_chk.close()
 
-        ok_cfg, cfg_data = await client.get_account_config()
-        acct_lv, cfg_pos_mode = (
-            parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
-        )
-        blocked = isolated_td_mode_blocked_reason(acct_lv)
-        if blocked:
-            print(f"[live_follow] open skip sim_id={intent.sim_record_id}: {blocked}")
-            _set_live_open_ok(intent.sim_record_id, False)
-            _set_live_last_error(intent.sim_record_id, f"open skip: {blocked}")
-            return
-        td_mode = LIVE_FOLLOW_TD_MODE
-        hedge_mode = cfg_pos_mode != "net_mode"
+            db_chk = SessionLocal()
+            try:
+                sim2 = db_chk.get(FollowSimRecord, intent.sim_record_id)
+                if sim2 is not None and sim2.live_open_ok is True:
+                    return
+            finally:
+                db_chk.close()
 
-        ok_pos, pos_data = await client.get_positions_inst("SWAP")
-        if ok_pos and isinstance(pos_data, dict):
-            for row in pos_data.get("data") or []:
-                if not isinstance(row, dict):
-                    continue
-                if _okx_swap_row_matches_follow_open(
-                    row,
-                    inst_id=inst_id,
-                    want_side=pos_side,
-                    hedge_mode=hedge_mode,
-                ):
+            ok_cfg, cfg_data = await client.get_account_config()
+            acct_lv, cfg_pos_mode = (
+                parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+            )
+            blocked = isolated_td_mode_blocked_reason(acct_lv)
+            if blocked:
+                print(f"[live_follow] open skip sim_id={intent.sim_record_id}: {blocked}")
+                _set_live_open_ok(intent.sim_record_id, False)
+                _set_live_last_error(intent.sim_record_id, f"open skip: {blocked}")
+                return
+            td_mode = LIVE_FOLLOW_TD_MODE
+            hedge_mode = cfg_pos_mode != "net_mode"
+
+            ok_pos, pos_data = await client.get_positions_inst("SWAP")
+            if ok_pos and isinstance(pos_data, dict):
+                for row in pos_data.get("data") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    if _okx_swap_row_matches_follow_open(
+                        row,
+                        inst_id=inst_id,
+                        want_side=pos_side,
+                        hedge_mode=hedge_mode,
+                    ):
+                        print(
+                            f"[live_follow] open skip already has position sim_id={intent.sim_record_id} "
+                            f"pos_id={intent.pos_id!r} inst={inst_id} side={pos_side}"
+                        )
+                        _set_live_open_ok(intent.sim_record_id, True)
+                        return
+
+            ok_pm, pm_data = await client.set_position_mode("long_short_mode")
+            if not ok_pm:
+                pm_code = str(pm_data.get("code", "")) if isinstance(pm_data, dict) else ""
+                if pm_code != "59000":
                     print(
-                        f"[live_follow] open skip already has position sim_id={intent.sim_record_id} "
-                        f"pos_id={intent.pos_id!r} inst={inst_id} side={pos_side}"
+                        f"[live_follow] open set_position_mode fail sim_id={intent.sim_record_id}: "
+                        f"{pm_data!r}"
                     )
-                    _set_live_open_ok(intent.sim_record_id, True)
+                    _set_live_open_ok(intent.sim_record_id, False)
+                    _set_live_last_error(intent.sim_record_id, _summarize_order_error(pm_data))
                     return
 
-        ok_pm, pm_data = await client.set_position_mode("long_short_mode")
-        if not ok_pm:
-            pm_code = str(pm_data.get("code", "")) if isinstance(pm_data, dict) else ""
-            if pm_code != "59000":
-                print(
-                    f"[live_follow] open set_position_mode fail sim_id={intent.sim_record_id}: "
-                    f"{pm_data!r}"
+            sizing_lever: int
+            if intent.lever_str:
+                try:
+                    lv = int(intent.lever_str)
+                except ValueError:
+                    print(
+                        f"[live_follow] open bad lever sim_id={intent.sim_record_id}: "
+                        f"{intent.lever_str!r}"
+                    )
+                    _set_live_open_ok(intent.sim_record_id, False)
+                    _set_live_last_error(intent.sim_record_id, "open fail: invalid lever")
+                    return
+                if not (1 <= lv <= 125):
+                    print(f"[live_follow] open lever OOB sim_id={intent.sim_record_id}: {lv}")
+                    _set_live_open_ok(intent.sim_record_id, False)
+                    _set_live_last_error(intent.sim_record_id, "open fail: lever out of range")
+                    return
+                sizing_lever = lv
+                lev_pos: str | None = pos_side if hedge_mode else None
+                ok_lev, lev_data = await client.set_leverage(
+                    inst_id, str(lv), td_mode, pos_side=lev_pos, ccy=None
                 )
-                _set_live_open_ok(intent.sim_record_id, False)
-                _set_live_last_error(intent.sim_record_id, _summarize_order_error(pm_data))
-                return
+                if not ok_lev:
+                    print(
+                        f"[live_follow] open set_leverage fail sim_id={intent.sim_record_id}: "
+                        f"{lev_data!r}"
+                    )
+                    _set_live_open_ok(intent.sim_record_id, False)
+                    _set_live_last_error(intent.sim_record_id, _summarize_order_error(lev_data))
+                    return
+            else:
+                ok_li, li_data = await client.get_leverage_info(inst_id, td_mode)
+                if not ok_li:
+                    print(
+                        f"[live_follow] open get_leverage_info fail sim_id={intent.sim_record_id}: "
+                        f"{li_data!r}"
+                    )
+                    _set_live_open_ok(intent.sim_record_id, False)
+                    _set_live_last_error(intent.sim_record_id, _summarize_order_error(li_data))
+                    return
+                picked = sizing_lever_from_leverage_info(
+                    li_data, hedge_mode=hedge_mode, pos_side=pos_side
+                )
+                if picked is None:
+                    print(
+                        f"[live_follow] open no lever sim_id={intent.sim_record_id} inst={inst_id}"
+                    )
+                    _set_live_open_ok(intent.sim_record_id, False)
+                    _set_live_last_error(intent.sim_record_id, "open fail: no leverage available")
+                    return
+                sizing_lever = picked
 
-        sizing_lever: int
-        if intent.lever_str:
-            try:
-                lv = int(intent.lever_str)
-            except ValueError:
-                print(
-                    f"[live_follow] open bad lever sim_id={intent.sim_record_id}: "
-                    f"{intent.lever_str!r}"
-                )
-                _set_live_open_ok(intent.sim_record_id, False)
-                _set_live_last_error(intent.sim_record_id, "open fail: invalid lever")
-                return
-            if not (1 <= lv <= 125):
-                print(f"[live_follow] open lever OOB sim_id={intent.sim_record_id}: {lv}")
-                _set_live_open_ok(intent.sim_record_id, False)
-                _set_live_last_error(intent.sim_record_id, "open fail: lever out of range")
-                return
-            sizing_lever = lv
-            lev_pos: str | None = pos_side if hedge_mode else None
-            ok_lev, lev_data = await client.set_leverage(
-                inst_id, str(lv), td_mode, pos_side=lev_pos, ccy=None
+            contracts = intent.contracts.strip()
+            ok_order, payload = await client.place_swap_market_by_sz(
+                inst_id,
+                contracts,
+                td_mode=td_mode,
+                side=side,
+                pos_side=pos_side if hedge_mode else None,
             )
-            if not ok_lev:
+            if not ok_order:
                 print(
-                    f"[live_follow] open set_leverage fail sim_id={intent.sim_record_id}: "
-                    f"{lev_data!r}"
+                    f"[live_follow] open place_order fail sim_id={intent.sim_record_id} "
+                    f"pos_id={intent.pos_id!r}: {payload!r}"
                 )
                 _set_live_open_ok(intent.sim_record_id, False)
-                _set_live_last_error(intent.sim_record_id, _summarize_order_error(lev_data))
+                _set_live_last_error(intent.sim_record_id, _summarize_order_error(payload))
                 return
-        else:
-            ok_li, li_data = await client.get_leverage_info(inst_id, td_mode)
-            if not ok_li:
-                print(
-                    f"[live_follow] open get_leverage_info fail sim_id={intent.sim_record_id}: "
-                    f"{li_data!r}"
-                )
-                _set_live_open_ok(intent.sim_record_id, False)
-                _set_live_last_error(intent.sim_record_id, _summarize_order_error(li_data))
-                return
-            picked = sizing_lever_from_leverage_info(
-                li_data, hedge_mode=hedge_mode, pos_side=pos_side
-            )
-            if picked is None:
-                print(
-                    f"[live_follow] open no lever sim_id={intent.sim_record_id} inst={inst_id}"
-                )
-                _set_live_open_ok(intent.sim_record_id, False)
-                _set_live_last_error(intent.sim_record_id, "open fail: no leverage available")
-                return
-            sizing_lever = picked
-
-        contracts = intent.contracts.strip()
-        ok_order, payload = await client.place_swap_market_by_sz(
-            inst_id,
-            contracts,
-            td_mode=td_mode,
-            side=side,
-            pos_side=pos_side if hedge_mode else None,
-        )
-        if not ok_order:
             print(
-                f"[live_follow] open place_order fail sim_id={intent.sim_record_id} "
-                f"pos_id={intent.pos_id!r}: {payload!r}"
+                f"[live_follow] open ok follow_id={intent.follow_account_id} pos_id={intent.pos_id!r} "
+                f"inst={inst_id} side={pos_side}"
             )
-            _set_live_open_ok(intent.sim_record_id, False)
-            _set_live_last_error(intent.sim_record_id, _summarize_order_error(payload))
-            return
-        print(
-            f"[live_follow] open ok follow_id={intent.follow_account_id} pos_id={intent.pos_id!r} "
-            f"inst={inst_id} side={pos_side}"
-        )
-        _set_live_open_ok(intent.sim_record_id, True)
-        _set_live_last_error(intent.sim_record_id, None)
+            _set_live_open_ok(intent.sim_record_id, True)
+            _set_live_last_error(intent.sim_record_id, None)
         finally:
             _release_trade_guard_lock(
                 guard_db, intent.okx_api_account_id, intent.inst_id, intent.pos_side

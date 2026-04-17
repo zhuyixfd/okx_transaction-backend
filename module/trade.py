@@ -74,6 +74,19 @@ def _infer_side_for_net_position(pos: dict) -> str | None:
     return None
 
 
+def _infer_side_from_pos_sign(pos: dict) -> str | None:
+    """优先依据持仓张数符号判方向：pos>0 多，pos<0 空。"""
+    try:
+        v = float(str(pos.get("pos", "")).strip() or "0")
+    except (TypeError, ValueError):
+        return None
+    if v > 1e-12:
+        return "long"
+    if v < -1e-12:
+        return "short"
+    return None
+
+
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -272,9 +285,9 @@ class OkxTrade:
                 norm_side = raw_side
                 inferred_side = raw_side
             else:
-                # net 视为全仓：不参与跟单，仅保留推断方向用于展示/排查。
+                # net 视为全仓：优先按持仓张数正负判方向；拿不到时再回退到价差/收益推断。
                 norm_side = "net"
-                inferred_side = _infer_side_for_net_position(pos)
+                inferred_side = _infer_side_from_pos_sign(pos) or _infer_side_for_net_position(pos)
             res.append({
                 'posId': pos["posId"],
                 "cTime": pos["cTime"],

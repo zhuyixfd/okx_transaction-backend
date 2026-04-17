@@ -128,8 +128,47 @@ def _effective_follow_side(row: dict[str, Any]) -> str:
     raw = str(row.get("posSide", "")).strip().lower()
     if raw in ("long", "short"):
         return raw
+    # 全仓(net)兜底：优先按持仓量正负判方向，避免仅靠收益推断导致反向。
+    try:
+        pos_v = Decimal(str(row.get("pos") or "0").strip())
+    except Exception:
+        pos_v = Decimal(0)
+    if pos_v > Decimal("1e-12"):
+        return "long"
+    if pos_v < Decimal("-1e-12"):
+        return "short"
     inferred = str(row.get("posSideInferred", "")).strip().lower()
     return inferred if inferred in ("long", "short") else ""
+
+
+def _build_explicit_side_by_ccy(rows: list[dict[str, Any]]) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for r in rows:
+        ccy = str(r.get("posCcy", "")).strip().upper()
+        raw_side = str(r.get("posSide", "")).strip().lower()
+        if not ccy or raw_side not in ("long", "short"):
+            continue
+        s = out.get(ccy)
+        if s is None:
+            s = set()
+            out[ccy] = s
+        s.add(raw_side)
+    return out
+
+
+def _resolved_follow_side(row: dict[str, Any], explicit_side_by_ccy: dict[str, set[str]]) -> str:
+    side = _effective_follow_side(row)
+    raw_side = str(row.get("posSide", "")).strip().lower()
+    if raw_side != "net":
+        return side
+    ccy = str(row.get("posCcy", "")).strip().upper()
+    if not ccy:
+        return side
+    explicit = explicit_side_by_ccy.get(ccy) or set()
+    if len(explicit) == 1:
+        # 同币种存在唯一明确方向时，net 统一跟随该方向，避免出现反向单。
+        return next(iter(explicit))
+    return side
 
 
 def _norm_row(p: dict[str, Any]) -> dict[str, Any]:
@@ -469,6 +508,7 @@ def _reconcile_sim_follow_set(
         .scalars()
         .all()
     )
+    explicit_side_by_ccy = _build_explicit_side_by_ccy(list(new_map.values()))
     for rec in open_rows:
         pid = rec.pos_id
         if pid not in new_map:
@@ -480,7 +520,7 @@ def _reconcile_sim_follow_set(
         if not isinstance(new_row, dict):
             continue
         ccy = str(new_row.get("posCcy", "")).strip().upper()
-        side = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
+        side = (rec.pos_side or _resolved_follow_side(new_row, explicit_side_by_ccy)).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
             _log_not_follow_reason(
                 follow_id=acc.id,
@@ -493,7 +533,7 @@ def _reconcile_sim_follow_set(
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         # 调仓方向应以“对方当前持仓方向”为准，避免沿用历史方向导致先减后加的反向动作。
-        ps = _effective_follow_side(new_row) or (rec.pos_side or "").lower()
+        ps = _resolved_follow_side(new_row, explicit_side_by_ccy) or (rec.pos_side or "").lower()
         if not inst_id or ps not in ("long", "short") or acc.okx_api_account_id is None:
             continue
         lever_s = str(new_row.get("lever", "")).strip() or None
@@ -532,7 +572,7 @@ def _reconcile_sim_follow_set(
         if pid in skip_open_pids:
             continue
         ccy = str(new_map[pid].get("posCcy", "")).strip().upper()
-        side = _effective_follow_side(new_map[pid])
+        side = _resolved_follow_side(new_map[pid], explicit_side_by_ccy)
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
             _log_not_follow_reason(
                 follow_id=acc.id,
@@ -601,17 +641,7 @@ def _apply_snapshot_and_events(
 ) -> None:
     unique_rows = _unique_positions_by_pos_id(positions)
     new_map = {str(p["posId"]): _norm_row(p) for p in unique_rows if p.get("posId") is not None}
-    explicit_side_by_ccy: dict[str, set[str]] = {}
-    for p in unique_rows:
-        ccy = str(p.get("posCcy", "")).strip().upper()
-        raw_side = str(p.get("posSide", "")).strip().lower()
-        if not ccy or raw_side not in ("long", "short"):
-            continue
-        s = explicit_side_by_ccy.get(ccy)
-        if s is None:
-            s = set()
-            explicit_side_by_ccy[ccy] = s
-        s.add(raw_side)
+    explicit_side_by_ccy = _build_explicit_side_by_ccy(unique_rows)
     snap = db.get(FollowPositionSnapshot, acc.id)
     un = acc.unique_name or ""
 
@@ -629,7 +659,7 @@ def _apply_snapshot_and_events(
         pid = str(p.get("posId", "")).strip()
         if not pid:
             return False
-        side = _effective_follow_side(p)
+        side = _resolved_follow_side(p, explicit_side_by_ccy)
         raw_side = str(p.get("posSide", "")).strip().lower()
         ccy = str(p.get("posCcy", "")).strip().upper()
         if side not in ("long", "short"):
@@ -673,7 +703,7 @@ def _apply_snapshot_and_events(
     )
     for pid, row in new_map.items():
         ccy = str(row.get("posCcy", "")).strip().upper()
-        side = _effective_follow_side(row)
+        side = _resolved_follow_side(row, explicit_side_by_ccy)
         raw_side = str(row.get("posSide", "")).strip().lower()
         if side not in ("long", "short"):
             _log_not_follow_reason(

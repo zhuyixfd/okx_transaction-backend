@@ -409,8 +409,16 @@ def _dec(raw: object) -> Decimal | None:
 
 async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
+        print(
+            f"[live_follow] adjust skip paused_side follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
+        )
         return
     if _debounced_trade_action(intent.okx_api_account_id, intent.inst_id, intent.pos_side):
+        print(
+            f"[live_follow] adjust skip debounce follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
+        )
         return
     db = SessionLocal()
     try:
@@ -435,6 +443,10 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
 
     ok_pos, pos_data = await client.get_positions_inst("SWAP")
     if not ok_pos or not isinstance(pos_data, dict):
+        print(
+            f"[live_follow] adjust skip get_positions_fail follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
+        )
         return
     cur = Decimal("0")
     for row in pos_data.get("data") or []:
@@ -457,6 +469,10 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
                 cur += abs(c)
     contracts = intent.contracts.strip()
     if not contracts:
+        print(
+            f"[live_follow] adjust skip empty_contracts follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
+        )
         return
 
     side: str
@@ -464,12 +480,26 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     if intent.action == "rebalance":
         want = _dec(contracts)
         if want is None or want <= 0:
+            print(
+                f"[live_follow] adjust skip invalid_target follow_id={intent.follow_account_id} "
+                f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
+                f"target={contracts!r}"
+            )
             return
         diff = want - cur
         if abs(diff) < REBALANCE_DEADBAND_CONTRACTS:
+            print(
+                f"[live_follow] adjust skip deadband follow_id={intent.follow_account_id} "
+                f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
+                f"want={format(want, 'f')} cur={format(cur, 'f')} diff={format(diff, 'f')}"
+            )
             return
         place_contracts = format(abs(diff), "f").rstrip("0").rstrip(".")
         if not place_contracts:
+            print(
+                f"[live_follow] adjust skip empty_place_contracts follow_id={intent.follow_account_id} "
+                f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
+            )
             return
         if diff > 0:
             side = "buy" if intent.pos_side == "long" else "sell"
@@ -487,7 +517,17 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         pos_side=intent.pos_side if hedge_mode else None,
     )
     if not ok_order:
+        print(
+            f"[live_follow] adjust fail follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
+            f"action={intent.action} place_side={side} place_contracts={place_contracts}"
+        )
         return
+    print(
+        f"[live_follow] adjust ok follow_id={intent.follow_account_id} "
+        f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
+        f"action={intent.action} target={contracts} cur={format(cur, 'f')} place={place_contracts}"
+    )
 
 
 async def run_live_follow_intents(

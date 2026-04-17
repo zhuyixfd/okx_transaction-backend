@@ -31,6 +31,22 @@ def _log(msg: str) -> None:
     print(f"[{ts}] [position_monitor] {msg}")
 
 
+def _log_not_follow_reason(
+    *,
+    follow_id: int,
+    unique_name: str | None,
+    pos_id: str | None,
+    pos_ccy: str | None,
+    pos_side: str | None,
+    reason: str,
+) -> None:
+    _log(
+        "not_follow "
+        f"follow_id={follow_id} unique_name={unique_name!r} "
+        f"pos_id={pos_id!r} ccy={pos_ccy!r} side={pos_side!r} reason={reason}"
+    )
+
+
 def _c_time_key(p: dict[str, Any]) -> tuple[int, str]:
     ct = p.get("cTime")
     try:
@@ -453,6 +469,14 @@ def _reconcile_sim_follow_set(
         ccy = str(new_row.get("posCcy", "")).strip().upper()
         side = (rec.pos_side or str(new_row.get("posSide", ""))).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
+            _log_not_follow_reason(
+                follow_id=acc.id,
+                unique_name=acc.unique_name,
+                pos_id=pid,
+                pos_ccy=ccy,
+                pos_side=side,
+                reason="paused_by_side_config_adjust_skip",
+            )
             continue
         inst_id = normalize_swap_inst_id((rec.pos_ccy or "").strip() or str(new_row.get("posCcy", "")))
         # 调仓方向应以“对方当前持仓方向”为准，避免沿用历史方向导致先减后加的反向动作。
@@ -497,6 +521,14 @@ def _reconcile_sim_follow_set(
         ccy = str(new_map[pid].get("posCcy", "")).strip().upper()
         side = str(new_map[pid].get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
+            _log_not_follow_reason(
+                follow_id=acc.id,
+                unique_name=acc.unique_name,
+                pos_id=pid,
+                pos_ccy=ccy,
+                pos_side=side,
+                reason="paused_by_side_config_open_skip",
+            )
             continue
         if not _has_open_sim(db, acc_id, pid):
             sid = _create_sim_open(db, acc, new_map[pid], pid, open_ev=None)
@@ -576,6 +608,14 @@ def _apply_snapshot_and_events(
         ccy = str(p.get("posCcy", "")).strip().upper()
         side = str(p.get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
+            _log_not_follow_reason(
+                follow_id=acc.id,
+                unique_name=acc.unique_name,
+                pos_id=pid,
+                pos_ccy=ccy,
+                pos_side=side,
+                reason="paused_by_side_config_eligible_filter",
+            )
             return False
         return True
 
@@ -588,6 +628,14 @@ def _apply_snapshot_and_events(
         ccy = str(row.get("posCcy", "")).strip().upper()
         side = str(row.get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
+            _log_not_follow_reason(
+                follow_id=acc.id,
+                unique_name=acc.unique_name,
+                pos_id=pid,
+                pos_ccy=ccy,
+                pos_side=side,
+                reason="paused_by_side_config_open_branch_skip",
+            )
             continue
         if pid not in old_map:
             ev = FollowPositionEvent(
@@ -617,6 +665,15 @@ def _apply_snapshot_and_events(
                         open_intents,
                         source_equity_usdt=source_equity_usdt,
                     )
+            else:
+                _log_not_follow_reason(
+                    follow_id=acc.id,
+                    unique_name=acc.unique_name,
+                    pos_id=pid,
+                    pos_ccy=ccy,
+                    pos_side=side,
+                    reason="out_of_max_follow_positions",
+                )
 
     for pid, old_row in old_map.items():
         if pid not in new_map:

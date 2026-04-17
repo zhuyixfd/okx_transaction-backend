@@ -28,11 +28,26 @@ from v1.Services.okx_contract_helpers import (
 
 LIVE_FOLLOW_TD_MODE = "isolated"
 REBALANCE_DEADBAND_CONTRACTS = Decimal("0.01")
-REBALANCE_COOLDOWN_SEC = 2.0
+TRADE_ACTION_DEBOUNCE_SEC = 3.0
 
 _live_open_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 """(okx_api_accounts.id, instId 大写, pos_side long|short) 下同进程串行开仓。"""
 _live_adjust_last_ts: dict[tuple[int, str, str], float] = {}
+
+
+def _debounced_trade_action(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> bool:
+    """
+    同币种同方向 3 秒内只允许一次“加/减/平”动作。
+    返回 True 表示命中防抖，应跳过本次执行。
+    """
+    side = (pos_side or "net").strip().lower()
+    key = (okx_api_account_id, inst_id.strip().upper(), side)
+    now_ts = time.monotonic()
+    last_ts = _live_adjust_last_ts.get(key, 0.0)
+    if (now_ts - last_ts) < TRADE_ACTION_DEBOUNCE_SEC:
+        return True
+    _live_adjust_last_ts[key] = now_ts
+    return False
 
 
 def _get_live_open_lock(key: tuple[int, str, str]) -> asyncio.Lock:
@@ -364,6 +379,9 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
     else:
         api_pos_side = None
 
+    if _debounced_trade_action(intent.okx_api_account_id, intent.inst_id, api_pos_side):
+        return
+
     ok_cp, data = await client.close_swap_position(
         intent.inst_id, td_mode, api_pos_side
     )
@@ -392,14 +410,7 @@ def _dec(raw: object) -> Decimal | None:
 async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
         return
-    adjust_key = (
-        intent.okx_api_account_id,
-        intent.inst_id.strip().upper(),
-        intent.pos_side.strip().lower(),
-    )
-    now_ts = time.monotonic()
-    last_ts = _live_adjust_last_ts.get(adjust_key, 0.0)
-    if (now_ts - last_ts) < REBALANCE_COOLDOWN_SEC:
+    if _debounced_trade_action(intent.okx_api_account_id, intent.inst_id, intent.pos_side):
         return
     db = SessionLocal()
     try:
@@ -477,7 +488,6 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     )
     if not ok_order:
         return
-    _live_adjust_last_ts[adjust_key] = time.monotonic()
 
 
 async def run_live_follow_intents(

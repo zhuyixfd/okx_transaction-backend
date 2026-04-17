@@ -601,6 +601,17 @@ def _apply_snapshot_and_events(
 ) -> None:
     unique_rows = _unique_positions_by_pos_id(positions)
     new_map = {str(p["posId"]): _norm_row(p) for p in unique_rows if p.get("posId") is not None}
+    explicit_side_by_ccy: dict[str, set[str]] = {}
+    for p in unique_rows:
+        ccy = str(p.get("posCcy", "")).strip().upper()
+        raw_side = str(p.get("posSide", "")).strip().lower()
+        if not ccy or raw_side not in ("long", "short"):
+            continue
+        s = explicit_side_by_ccy.get(ccy)
+        if s is None:
+            s = set()
+            explicit_side_by_ccy[ccy] = s
+        s.add(raw_side)
     snap = db.get(FollowPositionSnapshot, acc.id)
     un = acc.unique_name or ""
 
@@ -619,17 +630,30 @@ def _apply_snapshot_and_events(
         if not pid:
             return False
         side = _effective_follow_side(p)
+        raw_side = str(p.get("posSide", "")).strip().lower()
+        ccy = str(p.get("posCcy", "")).strip().upper()
         if side not in ("long", "short"):
             _log_not_follow_reason(
                 follow_id=acc.id,
                 unique_name=acc.unique_name,
                 pos_id=pid,
-                pos_ccy=str(p.get("posCcy", "")).strip().upper() or None,
-                pos_side=str(p.get("posSide", "")).strip().lower() or None,
+                pos_ccy=ccy or None,
+                pos_side=raw_side or None,
                 reason="invalid_or_uninferred_pos_side",
             )
             return False
-        ccy = str(p.get("posCcy", "")).strip().upper()
+        if raw_side == "net" and ccy:
+            explicit_sides = explicit_side_by_ccy.get(ccy) or set()
+            if explicit_sides and side not in explicit_sides:
+                _log_not_follow_reason(
+                    follow_id=acc.id,
+                    unique_name=acc.unique_name,
+                    pos_id=pid,
+                    pos_ccy=ccy,
+                    pos_side=side,
+                    reason="net_inferred_side_conflicts_with_explicit_side",
+                )
+                return False
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
             _log_not_follow_reason(
                 follow_id=acc.id,
@@ -650,16 +674,29 @@ def _apply_snapshot_and_events(
     for pid, row in new_map.items():
         ccy = str(row.get("posCcy", "")).strip().upper()
         side = _effective_follow_side(row)
+        raw_side = str(row.get("posSide", "")).strip().lower()
         if side not in ("long", "short"):
             _log_not_follow_reason(
                 follow_id=acc.id,
                 unique_name=acc.unique_name,
                 pos_id=pid,
                 pos_ccy=ccy or None,
-                pos_side=str(row.get("posSide", "")).strip().lower() or None,
+                pos_side=raw_side or None,
                 reason="invalid_or_uninferred_pos_side",
             )
             continue
+        if raw_side == "net" and ccy:
+            explicit_sides = explicit_side_by_ccy.get(ccy) or set()
+            if explicit_sides and side not in explicit_sides:
+                _log_not_follow_reason(
+                    follow_id=acc.id,
+                    unique_name=acc.unique_name,
+                    pos_id=pid,
+                    pos_ccy=ccy,
+                    pos_side=side,
+                    reason="net_inferred_side_conflicts_with_explicit_side",
+                )
+                continue
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
             _log_not_follow_reason(
                 follow_id=acc.id,

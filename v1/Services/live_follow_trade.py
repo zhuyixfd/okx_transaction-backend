@@ -308,11 +308,11 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
     lock = _get_live_open_lock(lock_key)
     async with lock:
         guard_db = _acquire_trade_guard_lock(
-            intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=0
+            intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=1
         )
         if guard_db is None:
             print(
-                f"[live_follow] open skip guard_lock_busy sim_id={intent.sim_record_id} "
+                f"[live_follow] open skip guard_lock_timeout sim_id={intent.sim_record_id} "
                 f"inst={intent.inst_id} side={intent.pos_side}"
             )
             return
@@ -503,11 +503,11 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
         )
         return
     guard_db = _acquire_trade_guard_lock(
-        intent.okx_api_account_id, intent.inst_id, api_pos_side, timeout_sec=0
+        intent.okx_api_account_id, intent.inst_id, api_pos_side, timeout_sec=1
     )
     if guard_db is None:
         print(
-            f"[live_follow] close skip guard_lock_busy follow_id={intent.follow_account_id} "
+            f"[live_follow] close skip guard_lock_timeout follow_id={intent.follow_account_id} "
             f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
         )
         return
@@ -557,11 +557,11 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         )
         return
     guard_db = _acquire_trade_guard_lock(
-        intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=0
+        intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=1
     )
     if guard_db is None:
         print(
-            f"[live_follow] adjust skip guard_lock_busy follow_id={intent.follow_account_id} "
+            f"[live_follow] adjust skip guard_lock_timeout follow_id={intent.follow_account_id} "
             f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
         )
         return

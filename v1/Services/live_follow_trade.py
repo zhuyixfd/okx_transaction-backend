@@ -317,7 +317,7 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
             )
             return
         try:
-        if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
+            if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
             print(
                 f"[live_follow] open skip manually_blocked_side sim_id={intent.sim_record_id} "
                 f"inst={intent.inst_id} side={intent.pos_side}"

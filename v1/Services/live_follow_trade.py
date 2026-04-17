@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 
+from sqlalchemy import text
 from sqlalchemy import select
 
 from config.cn_time import now_cn
@@ -75,6 +76,55 @@ def _mark_trade_action_success(
     side = (pos_side or "net").strip().lower()
     key = (okx_api_account_id, inst_id.strip().upper(), side)
     _live_trade_success_last_ts[key] = time.monotonic()
+
+
+def _trade_guard_lock_key(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> str:
+    side = (pos_side or "net").strip().lower() or "net"
+    inst = inst_id.strip().upper()
+    return f"live_follow:{okx_api_account_id}:{inst}:{side}"
+
+
+def _acquire_trade_guard_lock(
+    okx_api_account_id: int,
+    inst_id: str,
+    pos_side: str | None,
+    timeout_sec: int = 0,
+) -> SessionLocal | None:
+    """
+    跨进程互斥：基于 MySQL GET_LOCK，避免多进程重复对同一标的同向下单。
+    成功返回持锁 Session；失败返回 None。
+    """
+    db = SessionLocal()
+    try:
+        key = _trade_guard_lock_key(okx_api_account_id, inst_id, pos_side)
+        got = db.execute(
+            text("SELECT GET_LOCK(:k, :t)"),
+            {"k": key, "t": int(timeout_sec)},
+        ).scalar_one_or_none()
+        if int(got or 0) != 1:
+            db.close()
+            return None
+        return db
+    except Exception:
+        db.close()
+        return None
+
+
+def _release_trade_guard_lock(
+    db: SessionLocal | None,
+    okx_api_account_id: int,
+    inst_id: str,
+    pos_side: str | None,
+) -> None:
+    if db is None:
+        return
+    try:
+        key = _trade_guard_lock_key(okx_api_account_id, inst_id, pos_side)
+        db.execute(text("SELECT RELEASE_LOCK(:k)"), {"k": key})
+    except Exception:
+        pass
+    finally:
+        db.close()
 
 
 def _get_live_open_lock(key: tuple[int, str, str]) -> asyncio.Lock:
@@ -257,6 +307,16 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
     )
     lock = _get_live_open_lock(lock_key)
     async with lock:
+        guard_db = _acquire_trade_guard_lock(
+            intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=0
+        )
+        if guard_db is None:
+            print(
+                f"[live_follow] open skip guard_lock_busy sim_id={intent.sim_record_id} "
+                f"inst={intent.inst_id} side={intent.pos_side}"
+            )
+            return
+        try:
         if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
             print(
                 f"[live_follow] open skip manually_blocked_side sim_id={intent.sim_record_id} "
@@ -390,6 +450,10 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
         )
         _set_live_open_ok(intent.sim_record_id, True)
         _set_live_last_error(intent.sim_record_id, None)
+        finally:
+            _release_trade_guard_lock(
+                guard_db, intent.okx_api_account_id, intent.inst_id, intent.pos_side
+            )
 
 
 async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
@@ -438,25 +502,37 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
             f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
         )
         return
-
-    ok_cp, data = await client.close_swap_position(
-        intent.inst_id, td_mode, api_pos_side
+    guard_db = _acquire_trade_guard_lock(
+        intent.okx_api_account_id, intent.inst_id, api_pos_side, timeout_sec=0
     )
-    if not ok_cp:
+    if guard_db is None:
         print(
-            f"[live_follow] close fail follow_id={intent.follow_account_id} "
-            f"sim_id={intent.sim_record_id} inst={intent.inst_id}: {data!r}"
+            f"[live_follow] close skip guard_lock_busy follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
         )
-        _set_live_close_ok(intent.sim_record_id, False)
-        _set_live_last_error(intent.sim_record_id, _summarize_order_error(data))
         return
-    print(
-        f"[live_follow] close ok follow_id={intent.follow_account_id} "
-        f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
-    )
-    _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, api_pos_side)
-    _set_live_close_ok(intent.sim_record_id, True)
-    _set_live_last_error(intent.sim_record_id, None)
+
+    try:
+        ok_cp, data = await client.close_swap_position(
+            intent.inst_id, td_mode, api_pos_side
+        )
+        if not ok_cp:
+            print(
+                f"[live_follow] close fail follow_id={intent.follow_account_id} "
+                f"sim_id={intent.sim_record_id} inst={intent.inst_id}: {data!r}"
+            )
+            _set_live_close_ok(intent.sim_record_id, False)
+            _set_live_last_error(intent.sim_record_id, _summarize_order_error(data))
+            return
+        print(
+            f"[live_follow] close ok follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
+        )
+        _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, api_pos_side)
+        _set_live_close_ok(intent.sim_record_id, True)
+        _set_live_last_error(intent.sim_record_id, None)
+    finally:
+        _release_trade_guard_lock(guard_db, intent.okx_api_account_id, intent.inst_id, api_pos_side)
 
 
 def _dec(raw: object) -> Decimal | None:
@@ -477,6 +553,15 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
     if _trade_action_cooldown_hit(intent.okx_api_account_id, intent.inst_id, intent.pos_side):
         print(
             f"[live_follow] adjust skip debounce follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
+        )
+        return
+    guard_db = _acquire_trade_guard_lock(
+        intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=0
+    )
+    if guard_db is None:
+        print(
+            f"[live_follow] adjust skip guard_lock_busy follow_id={intent.follow_account_id} "
             f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
         )
         return
@@ -569,29 +654,32 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         side = "buy" if intent.pos_side == "long" else "sell"
     else:
         side = "sell" if intent.pos_side == "long" else "buy"
-    ok_order, order_payload = await client.place_swap_market_by_sz(
-        intent.inst_id,
-        place_contracts,
-        td_mode=td_mode,
-        side=side,
-        pos_side=intent.pos_side if hedge_mode else None,
-    )
-    if not ok_order:
-        print(
-            f"[live_follow] adjust fail follow_id={intent.follow_account_id} "
-            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
-            f"action={intent.action} place_side={side} place_contracts={place_contracts} "
-            f"payload={order_payload!r}"
+    try:
+        ok_order, order_payload = await client.place_swap_market_by_sz(
+            intent.inst_id,
+            place_contracts,
+            td_mode=td_mode,
+            side=side,
+            pos_side=intent.pos_side if hedge_mode else None,
         )
-        _set_live_last_error(intent.sim_record_id, _summarize_order_error(order_payload))
-        return
-    print(
-        f"[live_follow] adjust ok follow_id={intent.follow_account_id} "
-        f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
-        f"action={intent.action} target={contracts} cur={format(cur, 'f')} place={place_contracts}"
-    )
-    _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, intent.pos_side)
-    _set_live_last_error(intent.sim_record_id, None)
+        if not ok_order:
+            print(
+                f"[live_follow] adjust fail follow_id={intent.follow_account_id} "
+                f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
+                f"action={intent.action} place_side={side} place_contracts={place_contracts} "
+                f"payload={order_payload!r}"
+            )
+            _set_live_last_error(intent.sim_record_id, _summarize_order_error(order_payload))
+            return
+        print(
+            f"[live_follow] adjust ok follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side} "
+            f"action={intent.action} target={contracts} cur={format(cur, 'f')} place={place_contracts}"
+        )
+        _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, intent.pos_side)
+        _set_live_last_error(intent.sim_record_id, None)
+    finally:
+        _release_trade_guard_lock(guard_db, intent.okx_api_account_id, intent.inst_id, intent.pos_side)
 
 
 async def run_live_follow_intents(

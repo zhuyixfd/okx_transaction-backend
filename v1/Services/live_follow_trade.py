@@ -12,6 +12,8 @@ import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from config.cn_time import now_cn
 from config.db import SessionLocal
 from module.follow_order import okx_client_for_db_secrets
@@ -129,6 +131,38 @@ def _set_live_close_ok(sim_id: int, value: bool) -> None:
         db.close()
 
 
+def _inst_base_ccy(inst_id: str) -> str:
+    s = str(inst_id or "").strip().upper()
+    if not s:
+        return ""
+    i = s.find("-")
+    return s[:i] if i > 0 else s
+
+
+def _is_ccy_manually_blocked(follow_account_id: int, inst_id: str) -> bool:
+    """该币种最新记录若为 closed 且 live_close_ok=True，则视为手动关闭该币跟单。"""
+    ccy = _inst_base_ccy(inst_id)
+    if not ccy:
+        return False
+    db = SessionLocal()
+    try:
+        rec = (
+            db.execute(
+                select(FollowSimRecord)
+                .where(
+                    FollowSimRecord.follow_account_id == follow_account_id,
+                    FollowSimRecord.pos_ccy == ccy,
+                )
+                .order_by(FollowSimRecord.id.desc())
+                .limit(1)
+            )
+            .scalar_one_or_none()
+        )
+        return bool(rec is not None and rec.status == "closed" and rec.live_close_ok is True)
+    finally:
+        db.close()
+
+
 async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
     db = SessionLocal()
     try:
@@ -166,6 +200,14 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
     )
     lock = _get_live_open_lock(lock_key)
     async with lock:
+        if _is_ccy_manually_blocked(intent.follow_account_id, intent.inst_id):
+            print(
+                f"[live_follow] open skip manually_blocked_ccy sim_id={intent.sim_record_id} "
+                f"inst={intent.inst_id}"
+            )
+            _set_live_open_ok(intent.sim_record_id, False)
+            return
+
         db_chk = SessionLocal()
         try:
             sim2 = db_chk.get(FollowSimRecord, intent.sim_record_id)

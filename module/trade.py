@@ -124,6 +124,38 @@ class OkxTrade:
             return await cls.clean_position_current(data)
 
     @classmethod
+    async def get_position_current_safe(cls, uniqueName: str) -> tuple[bool, list[dict]]:
+        """
+        安全版当前持仓拉取。
+        返回 (ok, positions):
+        - ok=True  表示请求与返回结构正常（允许 positions 为空，代表真空仓）
+        - ok=False 表示接口请求失败或返回结构异常（本轮应跳过，不做开平仓动作）
+        """
+        session = cls.get_session()
+        try:
+            async with session.get(
+                url=cls.query_position_current,
+                params={"uniqueName": uniqueName, "t": int(time.time() * 1000)},
+            ) as response:
+                if response.status != 200:
+                    return (False, [])
+                data = await response.json()
+        except Exception:
+            return (False, [])
+
+        if not isinstance(data, dict):
+            return (False, [])
+        code = str(data.get("code", "")).strip()
+        if code and code != "0":
+            return (False, [])
+        try:
+            _ = data["data"][0]["posData"]
+        except (KeyError, IndexError, TypeError):
+            return (False, [])
+        rows = await cls.clean_position_current(data)
+        return (True, rows if isinstance(rows, list) else [])
+
+    @classmethod
     async def get_position_history(cls, unique_name: str, limit: int = 100, offset: int = 0):
         """
         获取社区历史仓位（平仓记录）。

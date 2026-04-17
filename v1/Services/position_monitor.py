@@ -799,7 +799,11 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
         while True:
             try:
                 # 对方持仓主链路：优先拉取，不等待 overview。
-                raw = await OkxTrade.get_position_current(unique_name)
+                ok_raw, raw = await OkxTrade.get_position_current_safe(unique_name)
+                if not ok_raw:
+                    _log(f"skip tick due to bad source response unique_name={unique_name!r}")
+                    await asyncio.sleep(_ACCOUNT_POLL_INTERVAL_SEC)
+                    continue
                 if not isinstance(raw, list):
                     raw = []
 

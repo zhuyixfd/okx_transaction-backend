@@ -131,27 +131,6 @@ def _set_live_close_ok(sim_id: int, value: bool) -> None:
         db.close()
 
 
-def _is_pos_manually_blocked(follow_account_id: int, pos_id: str) -> bool:
-    """该 pos_id 最新记录若为 closed 且 live_close_ok=True，则视为手动关闭跟单。"""
-    db = SessionLocal()
-    try:
-        rec = (
-            db.execute(
-                select(FollowSimRecord)
-                .where(
-                    FollowSimRecord.follow_account_id == follow_account_id,
-                    FollowSimRecord.pos_id == pos_id,
-                )
-                .order_by(FollowSimRecord.id.desc())
-                .limit(1)
-            )
-            .scalar_one_or_none()
-        )
-        return bool(rec is not None and rec.status == "closed" and rec.live_close_ok is True)
-    finally:
-        db.close()
-
-
 def _side_block_pid(ccy: str, side: str) -> str:
     return f"__side_block__:{ccy.strip().upper()}:{side.strip().lower()}"
 
@@ -218,13 +197,6 @@ async def execute_live_follow_open(intent: LiveFollowOpenIntent) -> None:
     )
     lock = _get_live_open_lock(lock_key)
     async with lock:
-        if _is_pos_manually_blocked(intent.follow_account_id, intent.pos_id):
-            print(
-                f"[live_follow] open skip manually_blocked sim_id={intent.sim_record_id} "
-                f"pos_id={intent.pos_id!r}"
-            )
-            _set_live_open_ok(intent.sim_record_id, False)
-            return
         if _is_ccy_side_manually_blocked(intent.follow_account_id, intent.inst_id, intent.pos_side):
             print(
                 f"[live_follow] open skip manually_blocked_side sim_id={intent.sim_record_id} "

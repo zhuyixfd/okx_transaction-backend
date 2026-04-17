@@ -387,63 +387,6 @@ def _has_open_sim(db: Session, acc_id: int, pid: str) -> bool:
     return r is not None
 
 
-def _same_source_position_recently_closed(
-    db: Session,
-    acc_id: int,
-    pid: str,
-    row: dict[str, Any],
-) -> bool:
-    """
-    若该 posId 最近一条模拟记录已平仓，且其 close_event 里的 cTime 与当前社区仓位一致，
-    说明是“同一笔源仓位”被手动平掉，此时不应立即自动补开。
-    """
-    rec = db.execute(
-        select(FollowSimRecord)
-        .where(
-            FollowSimRecord.follow_account_id == acc_id,
-            FollowSimRecord.pos_id == pid,
-            FollowSimRecord.status == "closed",
-        )
-        .order_by(FollowSimRecord.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    # 仅把「手动关闭跟单」视为关闭标记；其余 closed（如自然平仓）不阻止默认开启跟单。
-    if rec is None or rec.close_event_id is None or rec.live_close_ok is not True:
-        return False
-    ev = db.get(FollowPositionEvent, rec.close_event_id)
-    if ev is None or not ev.detail_json:
-        return False
-    try:
-        d = json.loads(ev.detail_json)
-    except Exception:
-        return False
-    if not isinstance(d, dict):
-        return False
-    old_ct = str(d.get("cTime", "")).strip()
-    new_ct = str(row.get("cTime", "")).strip()
-    return bool(old_ct) and old_ct == new_ct
-
-
-def _pid_manually_closed(db: Session, acc_id: int, pid: str) -> bool:
-    """
-    同一 pos_id 的最新一条记录若为 closed 且 live_close_ok=True，
-    视为「手动关闭跟单」，在手动重新开启前禁止自动重开。
-    """
-    rec = (
-        db.execute(
-            select(FollowSimRecord)
-            .where(
-                FollowSimRecord.follow_account_id == acc_id,
-                FollowSimRecord.pos_id == pid,
-            )
-            .order_by(FollowSimRecord.id.desc())
-            .limit(1)
-        )
-        .scalar_one_or_none()
-    )
-    return bool(rec is not None and rec.status == "closed" and rec.live_close_ok is True)
-
-
 def _side_block_pid(ccy: str, side: str) -> str:
     return f"__side_block__:{ccy.strip().upper()}:{side.strip().lower()}"
 
@@ -550,13 +493,9 @@ def _reconcile_sim_follow_set(
             continue
         if pid in skip_open_pids:
             continue
-        if _pid_manually_closed(db, acc_id, pid):
-            continue
         ccy = str(new_map[pid].get("posCcy", "")).strip().upper()
         side = str(new_map[pid].get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc_id, ccy, side):
-            continue
-        if _same_source_position_recently_closed(db, acc_id, pid, new_map[pid]):
             continue
         if not _has_open_sim(db, acc_id, pid):
             sid = _create_sim_open(db, acc, new_map[pid], pid, open_ev=None)
@@ -633,8 +572,6 @@ def _apply_snapshot_and_events(
         pid = str(p.get("posId", "")).strip()
         if not pid:
             return False
-        if _pid_manually_closed(db, acc.id, pid):
-            return False
         ccy = str(p.get("posCcy", "")).strip().upper()
         side = str(p.get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
@@ -647,8 +584,6 @@ def _apply_snapshot_and_events(
         include_predicate=_can_follow_row,
     )
     for pid, row in new_map.items():
-        if _pid_manually_closed(db, acc.id, pid):
-            continue
         ccy = str(row.get("posCcy", "")).strip().upper()
         side = str(row.get("posSide", "")).strip().lower()
         if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):

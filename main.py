@@ -28,10 +28,15 @@ app.include_router(okx_api_accounts_router)
 app.include_router(auth_router)
 app.include_router(manual_okx_router)
 
+_monitor_tasks_started = False
+_position_monitor_task = None
+_margin_monitor_task = None
+
 
 @app.on_event("startup")
 async def on_startup() -> None:
     import asyncio
+    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task
 
     # 建表；若无 admin 用户则自动创建（与 migrate/init 等价的一次性引导）。
     try:
@@ -46,8 +51,25 @@ async def on_startup() -> None:
     from v1.Services.margin_monitor import margin_monitor_loop
     from v1.Services.position_monitor import position_monitor_loop
 
-    asyncio.create_task(position_monitor_loop())
-    asyncio.create_task(margin_monitor_loop())
+    if not _monitor_tasks_started:
+        _position_monitor_task = asyncio.create_task(position_monitor_loop())
+        _margin_monitor_task = asyncio.create_task(margin_monitor_loop())
+        _monitor_tasks_started = True
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    import asyncio
+    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task
+
+    tasks = [t for t in (_position_monitor_task, _margin_monitor_task) if t is not None]
+    for t in tasks:
+        t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _position_monitor_task = None
+    _margin_monitor_task = None
+    _monitor_tasks_started = False
 
 
 @app.get("/health/db")

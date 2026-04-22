@@ -880,7 +880,12 @@ def _sync_apply_positions(
     aid: int,
     positions: list[dict[str, Any]],
     source_equity_usdt_s: str | None,
-) -> tuple[list[LiveFollowCloseIntent], list[LiveFollowOpenIntent], list[LiveFollowAdjustIntent]]:
+) -> tuple[
+    list[LiveFollowCloseIntent],
+    list[LiveFollowOpenIntent],
+    list[LiveFollowAdjustIntent],
+    dict[str, int | None],
+]:
     close_intents: list[LiveFollowCloseIntent] = []
     open_intents: list[LiveFollowOpenIntent] = []
     adjust_intents: list[LiveFollowAdjustIntent] = []
@@ -888,10 +893,30 @@ def _sync_apply_positions(
     try:
         acc = db.get(FollowAccount, aid)
         if not acc or not acc.enabled or not acc.unique_name:
-            return ([], [], [])
+            return ([], [], [], {})
         src_eq = _to_dec(source_equity_usdt_s)
         if src_eq <= 0:
             src_eq = None
+        unique_rows = _unique_positions_by_pos_id(positions)
+        explicit_side_by_ccy = _build_explicit_side_by_ccy(unique_rows)
+        eligible = _sim_eligible_from_unique_filtered(
+            unique_rows,
+            acc.max_follow_positions,
+            include_predicate=lambda p: (
+                (lambda pid, side, ccy: (
+                    bool(pid)
+                    and side in ("long", "short")
+                    and not (
+                        ccy
+                        and _is_ccy_side_manually_blocked(db, acc.id, ccy, side)
+                    )
+                ))(
+                    str(p.get("posId", "")).strip(),
+                    _resolved_follow_side(p, explicit_side_by_ccy),
+                    str(p.get("posCcy", "")).strip().upper(),
+                )
+            ),
+        )
         _apply_snapshot_and_events(
             db,
             acc,
@@ -901,7 +926,29 @@ def _sync_apply_positions(
             adjust_intents=adjust_intents,
             source_equity_usdt=src_eq,
         )
-        return (close_intents, open_intents, adjust_intents)
+        open_sim_count = int(
+            db.execute(
+                select(FollowSimRecord.id).where(
+                    FollowSimRecord.follow_account_id == acc.id,
+                    FollowSimRecord.status == "open",
+                )
+            )
+            .scalars()
+            .all()
+            .__len__()
+        )
+        debug = {
+            "cfg_max_follow_positions": int(acc.max_follow_positions or 0)
+            if acc.max_follow_positions is not None
+            else None,
+            "source_unique_positions": len(unique_rows),
+            "eligible_positions": len(eligible),
+            "open_sim_count": open_sim_count,
+            "open_intents": len(open_intents),
+            "adjust_intents": len(adjust_intents),
+            "close_intents": len(close_intents),
+        }
+        return (close_intents, open_intents, adjust_intents, debug)
     except Exception:
         close_intents.clear()
         open_intents.clear()
@@ -974,7 +1021,7 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
                     finally:
                         overview_task = None
 
-                closes, opens, adjusts = await asyncio.to_thread(
+                closes, opens, adjusts, debug = await asyncio.to_thread(
                     _sync_apply_positions,
                     account_id,
                     raw,
@@ -984,6 +1031,17 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
                     f"tick follow_id={account_id} unique_name={unique_name!r} "
                     f"positions={len(raw)} close={len(closes)} open={len(opens)} adjust={len(adjusts)}"
                 )
+                if debug:
+                    _log(
+                        "tick_debug "
+                        f"follow_id={account_id} unique_name={unique_name!r} "
+                        f"cfg_max={debug.get('cfg_max_follow_positions')} "
+                        f"source_unique={debug.get('source_unique_positions')} "
+                        f"eligible={debug.get('eligible_positions')} "
+                        f"open_sim={debug.get('open_sim_count')} "
+                        f"intents(open/adjust/close)="
+                        f"{debug.get('open_intents')}/{debug.get('adjust_intents')}/{debug.get('close_intents')}"
+                    )
                 if closes or opens or adjusts:
                     await intents_queue.put((closes, opens, adjusts))
             except asyncio.CancelledError:

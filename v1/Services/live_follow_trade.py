@@ -212,6 +212,7 @@ class LiveFollowCloseIntent:
     sim_record_id: int
     inst_id: str
     pos_side: str | None
+    force: bool = False
 
 
 @dataclass(frozen=True)
@@ -519,14 +520,19 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
     else:
         api_pos_side = None
 
-    if _trade_action_cooldown_hit(intent.okx_api_account_id, intent.inst_id, api_pos_side):
+    if (not intent.force) and _trade_action_cooldown_hit(
+        intent.okx_api_account_id, intent.inst_id, api_pos_side
+    ):
         print(
             f"[live_follow] close skip debounce follow_id={intent.follow_account_id} "
             f"sim_id={intent.sim_record_id} inst={intent.inst_id}"
         )
         return
     guard_db = await _acquire_trade_guard_lock_with_retry(
-        intent.okx_api_account_id, intent.inst_id, api_pos_side, timeout_sec=1
+        intent.okx_api_account_id,
+        intent.inst_id,
+        api_pos_side,
+        timeout_sec=2 if intent.force else 1,
     )
     if guard_db is None:
         print(

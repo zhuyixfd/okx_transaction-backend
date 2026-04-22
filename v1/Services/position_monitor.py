@@ -391,6 +391,8 @@ def _close_sim_at_exit(
     exit_row: dict[str, Any],
     close_ev: FollowPositionEvent | None,
     close_intents: list[LiveFollowCloseIntent],
+    *,
+    force_live_close: bool = False,
 ) -> None:
     rec = db.execute(
         select(FollowSimRecord)
@@ -409,7 +411,7 @@ def _close_sim_at_exit(
     want_live_close = (
         acc.live_trading_enabled
         and acc.okx_api_account_id is not None
-        and rec.live_open_ok is not False
+        and (force_live_close or rec.live_open_ok is not False)
     )
     ccy_for_close = (rec.pos_ccy or "").strip()
     inst_close = normalize_swap_inst_id(ccy_for_close) if ccy_for_close else ""
@@ -440,6 +442,7 @@ def _close_sim_at_exit(
                 sim_record_id=rec.id,
                 inst_id=inst_close,
                 pos_side=rec.pos_side,
+                force=force_live_close,
             )
         )
 
@@ -514,9 +517,35 @@ def _reconcile_sim_follow_set(
     for rec in open_rows:
         pid = rec.pos_id
         if pid not in new_map:
+            _close_sim_at_exit(
+                db,
+                acc,
+                pid,
+                {
+                    "posCcy": rec.pos_ccy or "",
+                    "posSide": rec.pos_side or "",
+                    "avgPx": rec.entry_avg_px or "0",
+                    "last": rec.last_mark_px or rec.entry_avg_px or "0",
+                    "pos": rec.src_pos or "0",
+                    "margin": rec.src_margin or "0",
+                    "mgnRatio": rec.src_mgn_ratio or "0",
+                    "liqPx": rec.src_liq_px or "0",
+                },
+                None,
+                close_intents,
+                force_live_close=True,
+            )
             continue
         if pid not in eligible:
-            _close_sim_at_exit(db, acc, pid, new_map[pid], None, close_intents)
+            _close_sim_at_exit(
+                db,
+                acc,
+                pid,
+                new_map[pid],
+                None,
+                close_intents,
+                force_live_close=True,
+            )
             continue
         new_row = new_map.get(pid)
         if not isinstance(new_row, dict):

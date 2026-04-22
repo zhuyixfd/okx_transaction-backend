@@ -404,10 +404,12 @@ def _close_sim_at_exit(
     ).scalar_one_or_none()
     if rec is None:
         return
+    # 只要进入关闭流程且启用真实跟单，就尝试触发实盘平仓。
+    # 不再强依赖 live_open_ok=True，避免状态漂移导致“对方已平而我方未平”。
     want_live_close = (
-        rec.live_open_ok is True
-        and acc.live_trading_enabled
+        acc.live_trading_enabled
         and acc.okx_api_account_id is not None
+        and rec.live_open_ok is not False
     )
     ccy_for_close = (rec.pos_ccy or "").strip()
     inst_close = normalize_swap_inst_id(ccy_for_close) if ccy_for_close else ""

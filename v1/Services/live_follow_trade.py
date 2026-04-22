@@ -727,7 +727,9 @@ async def run_live_follow_intents(
             continue
         seen_open.add(key)
         await execute_live_follow_open(it)
-    # 同一轮内同一交易员+合约+方向仅保留一条调仓 intent，避免多条 rebalance 互相打架导致仓位抖动。
+    # 同一轮内同一交易员+合约+方向的调仓 intent 合并。
+    # 对 rebalance：目标张数按同 key 求和，避免同币种同方向多仓时“只取最后一条”导致少跟。
+    # 对 add/reduce：仍保留最后一条，避免同轮动作打架。
     merged_adjust: dict[tuple[int, str, str], LiveFollowAdjustIntent] = {}
     for it in (adjust_intents or []):
         key = (
@@ -735,6 +737,29 @@ async def run_live_follow_intents(
             it.inst_id.strip().upper(),
             it.pos_side.strip().lower(),
         )
+        prev = merged_adjust.get(key)
+        if (
+            prev is not None
+            and prev.action == "rebalance"
+            and it.action == "rebalance"
+        ):
+            try:
+                merged_target = (
+                    Decimal(str(prev.contracts).strip()) + Decimal(str(it.contracts).strip())
+                )
+                merged_adjust[key] = LiveFollowAdjustIntent(
+                    follow_account_id=it.follow_account_id,
+                    okx_api_account_id=it.okx_api_account_id,
+                    sim_record_id=it.sim_record_id,
+                    inst_id=it.inst_id,
+                    pos_side=it.pos_side,
+                    lever_str=it.lever_str or prev.lever_str,
+                    action="rebalance",
+                    contracts=format(merged_target, "f").rstrip("0").rstrip(".") or "0",
+                )
+            except Exception:
+                merged_adjust[key] = it
+            continue
         merged_adjust[key] = it
     for it in merged_adjust.values():
         await execute_live_follow_adjust(it)

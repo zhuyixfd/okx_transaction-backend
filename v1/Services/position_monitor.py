@@ -666,6 +666,54 @@ def _refresh_sim_unrealized(
         r.updated_at = now
 
 
+def _append_retry_failed_live_closes(
+    db: Session,
+    acc: FollowAccount,
+    close_intents: list[LiveFollowCloseIntent],
+) -> None:
+    """
+    真实平仓失败补偿：
+    对每个 pos_id 只看最新记录；若已标记 closed 且 live_close_ok=False，则补发强制平仓。
+    """
+    if not acc.live_trading_enabled or acc.okx_api_account_id is None:
+        return
+    rows = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(
+                FollowSimRecord.follow_account_id == acc.id,
+                FollowSimRecord.pos_id.not_like("__side_block__:%"),
+            )
+            .order_by(FollowSimRecord.id.desc())
+            .limit(300)
+        )
+        .scalars()
+        .all()
+    )
+    seen_pid: set[str] = set()
+    for rec in rows:
+        pid = str(rec.pos_id or "").strip()
+        if not pid or pid in seen_pid:
+            continue
+        seen_pid.add(pid)
+        if rec.status != "closed" or rec.live_close_ok is not False:
+            continue
+        ccy = str(rec.pos_ccy or "").strip().upper()
+        inst_id = normalize_swap_inst_id(ccy) if ccy else ""
+        if not inst_id:
+            continue
+        close_intents.append(
+            LiveFollowCloseIntent(
+                follow_account_id=acc.id,
+                okx_api_account_id=acc.okx_api_account_id,
+                sim_record_id=rec.id,
+                inst_id=inst_id,
+                pos_side=rec.pos_side,
+                force=True,
+            )
+        )
+
+
 def _apply_snapshot_and_events(
     db: Session,
     acc: FollowAccount,
@@ -932,6 +980,7 @@ def _sync_apply_positions(
             adjust_intents=adjust_intents,
             source_equity_usdt=src_eq,
         )
+        _append_retry_failed_live_closes(db, acc, close_intents)
         open_sim_count = int(
             db.execute(
                 select(FollowSimRecord.id).where(

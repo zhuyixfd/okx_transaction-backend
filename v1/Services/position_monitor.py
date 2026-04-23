@@ -536,6 +536,11 @@ def _reconcile_sim_follow_set(
         seen_open_pid.add(pid)
         rec_ccy = str(rec.pos_ccy or "").strip().upper()
         rec_side = str(rec.pos_side or "").strip().lower()
+        if rec_ccy and rec_side in ("long", "short") and _is_ccy_side_manually_blocked(
+            db, acc_id, rec_ccy, rec_side
+        ):
+            # 暂停跟单配置：该币种+方向完全不介入（不自动平仓）。
+            continue
         # 兜底规则：对方已无该币种 -> 直接平（不依赖方向字段完整性）。
         if rec_ccy and rec_ccy not in source_ccy_set:
             _close_sim_at_exit(
@@ -1160,6 +1165,9 @@ async def _append_unmatched_own_position_closes(
                     continue
             else:
                 side = "long" if pos_v > 0 else "short"
+            if _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
+                # 暂停跟单配置：该币种+方向不做自动对齐平仓。
+                continue
             key = (ccy, side)
             if key in source_ccy_side_set:
                 continue

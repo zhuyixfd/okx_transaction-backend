@@ -791,5 +791,15 @@ async def run_live_follow_intents(
                 merged_adjust[key] = it
             continue
         merged_adjust[key] = it
-    for it in merged_adjust.values():
-        await execute_live_follow_adjust(it)
+    # 不同币种/方向调仓并发执行，避免单一币种锁等待/失败拖住其它币种。
+    merged_adjust_items = list(merged_adjust.values())
+    adjust_tasks = [asyncio.create_task(execute_live_follow_adjust(it)) for it in merged_adjust_items]
+    if adjust_tasks:
+        results = await asyncio.gather(*adjust_tasks, return_exceptions=True)
+        for idx, r in enumerate(results):
+            if isinstance(r, Exception):
+                it = merged_adjust_items[idx]
+                print(
+                    f"[live_follow] adjust task error follow_id={it.follow_account_id} "
+                    f"inst={it.inst_id} side={it.pos_side}: {r!r}"
+                )

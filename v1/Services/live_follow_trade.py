@@ -30,10 +30,12 @@ from v1.Services.okx_contract_helpers import (
 LIVE_FOLLOW_TD_MODE = "isolated"
 REBALANCE_DEADBAND_CONTRACTS = Decimal("0.01")
 TRADE_ACTION_DEBOUNCE_SEC = 3.0
+MIN_SZ_FAIL_COOLDOWN_SEC = 10.0
 
 _live_open_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 """(okx_api_accounts.id, instId 大写, pos_side long|short) 下同进程串行开仓。"""
 _live_trade_success_last_ts: dict[tuple[int, str, str], float] = {}
+_live_min_sz_fail_last_ts: dict[tuple[int, str, str], float] = {}
 
 
 def _summarize_order_error(payload: object) -> str:
@@ -76,6 +78,21 @@ def _mark_trade_action_success(
     side = (pos_side or "net").strip().lower()
     key = (okx_api_account_id, inst_id.strip().upper(), side)
     _live_trade_success_last_ts[key] = time.monotonic()
+
+
+def _mark_min_sz_fail(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> None:
+    side = (pos_side or "net").strip().lower()
+    key = (okx_api_account_id, inst_id.strip().upper(), side)
+    _live_min_sz_fail_last_ts[key] = time.monotonic()
+
+
+def _in_min_sz_fail_cooldown(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> bool:
+    side = (pos_side or "net").strip().lower()
+    key = (okx_api_account_id, inst_id.strip().upper(), side)
+    last_ts = _live_min_sz_fail_last_ts.get(key, 0.0)
+    if last_ts <= 0:
+        return False
+    return (time.monotonic() - last_ts) < MIN_SZ_FAIL_COOLDOWN_SEC
 
 
 def _trade_guard_lock_key(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> str:
@@ -585,6 +602,12 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
             f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
         )
         return
+    if _in_min_sz_fail_cooldown(intent.okx_api_account_id, intent.inst_id, intent.pos_side):
+        print(
+            f"[live_follow] adjust skip min_sz_cooldown follow_id={intent.follow_account_id} "
+            f"sim_id={intent.sim_record_id} inst={intent.inst_id} side={intent.pos_side}"
+        )
+        return
     guard_db = await _acquire_trade_guard_lock_with_retry(
         intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=1
     )
@@ -699,6 +722,13 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
                 f"payload={order_payload!r}"
             )
             _set_live_last_error(intent.sim_record_id, _summarize_order_error(order_payload))
+            payload_msg = str(order_payload.get("msg", "")).strip() if isinstance(order_payload, dict) else ""
+            payload_data = order_payload.get("data") if isinstance(order_payload, dict) else None
+            s_msg = ""
+            if isinstance(payload_data, list) and payload_data and isinstance(payload_data[0], dict):
+                s_msg = str(payload_data[0].get("sMsg", "")).strip()
+            if ("最小下单量" in payload_msg) or ("minimum order size" in payload_msg.lower()) or ("最小下单量" in s_msg):
+                _mark_min_sz_fail(intent.okx_api_account_id, intent.inst_id, intent.pos_side)
             return
         print(
             f"[live_follow] adjust ok follow_id={intent.follow_account_id} "

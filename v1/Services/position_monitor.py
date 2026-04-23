@@ -509,13 +509,19 @@ def _reconcile_sim_follow_set(
                 FollowSimRecord.follow_account_id == acc_id,
                 FollowSimRecord.status == "open",
             )
+            .order_by(FollowSimRecord.id.desc())
         )
         .scalars()
         .all()
     )
     explicit_side_by_ccy = _build_explicit_side_by_ccy(list(new_map.values()))
+    seen_open_pid: set[str] = set()
     for rec in open_rows:
         pid = rec.pos_id
+        if pid in seen_open_pid:
+            # 同一 pos_id 仅保留最新 open sim，避免重复调仓目标被累计放大。
+            continue
+        seen_open_pid.add(pid)
         if pid not in new_map:
             _close_sim_at_exit(
                 db,

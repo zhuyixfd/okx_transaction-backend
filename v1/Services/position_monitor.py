@@ -515,12 +515,15 @@ def _reconcile_sim_follow_set(
         .all()
     )
     explicit_side_by_ccy = _build_explicit_side_by_ccy(list(new_map.values()))
+    source_ccy_set: set[str] = set()
     source_ccy_side_set: set[tuple[str, str]] = set()
     for row in new_map.values():
         ccy = str(row.get("posCcy", "")).strip().upper()
         side = _resolved_follow_side(row, explicit_side_by_ccy)
-        if ccy and side in ("long", "short"):
-            source_ccy_side_set.add((ccy, side))
+        if ccy:
+            source_ccy_set.add(ccy)
+            if side in ("long", "short"):
+                source_ccy_side_set.add((ccy, side))
     seen_open_pid: set[str] = set()
     for rec in open_rows:
         pid = rec.pos_id
@@ -532,6 +535,27 @@ def _reconcile_sim_follow_set(
         seen_open_pid.add(pid)
         rec_ccy = str(rec.pos_ccy or "").strip().upper()
         rec_side = str(rec.pos_side or "").strip().lower()
+        # 兜底规则：对方已无该币种 -> 直接平（不依赖方向字段完整性）。
+        if rec_ccy and rec_ccy not in source_ccy_set:
+            _close_sim_at_exit(
+                db,
+                acc,
+                pid,
+                {
+                    "posCcy": rec_ccy,
+                    "posSide": rec.pos_side or "",
+                    "avgPx": rec.entry_avg_px or "0",
+                    "last": rec.last_mark_px or rec.entry_avg_px or "0",
+                    "pos": rec.src_pos or "0",
+                    "margin": rec.src_margin or "0",
+                    "mgnRatio": rec.src_mgn_ratio or "0",
+                    "liqPx": rec.src_liq_px or "0",
+                },
+                None,
+                close_intents,
+                force_live_close=True,
+            )
+            continue
         if rec_ccy and rec_side in ("long", "short") and (rec_ccy, rec_side) not in source_ccy_side_set:
             _close_sim_at_exit(
                 db,
@@ -1046,6 +1070,7 @@ def _sync_apply_positions(
 # 每帐户独立协程内的轮询间隔（秒）；各帐户互不影响。
 _ACCOUNT_POLL_INTERVAL_SEC = 0.8
 _OVERVIEW_REFRESH_INTERVAL_SEC = 5.0
+_EMPTY_SOURCE_DEBOUNCE_TICKS = 3
 
 
 async def _fetch_overview_equity(unique_name: str) -> str | None:
@@ -1062,6 +1087,7 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
     last_overview_fetch_mono = 0.0
     cached_src_eq: str | None = None
     overview_task: asyncio.Task[str | None] | None = None
+    empty_source_streak = 0
     intents_queue: asyncio.Queue[
         tuple[list[LiveFollowCloseIntent], list[LiveFollowOpenIntent], list[LiveFollowAdjustIntent]]
     ] = asyncio.Queue()
@@ -1088,6 +1114,17 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
                     continue
                 if not isinstance(raw, list):
                     raw = []
+                if len(raw) == 0:
+                    empty_source_streak += 1
+                    if empty_source_streak < _EMPTY_SOURCE_DEBOUNCE_TICKS:
+                        _log(
+                            f"skip tick due to empty source debounce unique_name={unique_name!r} "
+                            f"streak={empty_source_streak}/{_EMPTY_SOURCE_DEBOUNCE_TICKS}"
+                        )
+                        await asyncio.sleep(_ACCOUNT_POLL_INTERVAL_SEC)
+                        continue
+                else:
+                    empty_source_streak = 0
 
                 now_mono = time.monotonic()
                 need_refresh_overview = (

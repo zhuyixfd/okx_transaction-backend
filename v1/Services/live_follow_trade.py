@@ -58,6 +58,17 @@ def _summarize_order_error(payload: object) -> str:
     return out[:1000]
 
 
+def _is_okx_position_not_exists(payload: object) -> bool:
+    """OKX 51023: Position doesn't exist. 视为幂等平仓成功。"""
+    if not isinstance(payload, dict):
+        return False
+    code = str(payload.get("code", "")).strip()
+    msg = str(payload.get("msg", "")).strip().lower()
+    if code == "51023":
+        return True
+    return ("position" in msg) and ("doesn't exist" in msg or "does not exist" in msg)
+
+
 def _trade_action_cooldown_hit(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> bool:
     """
     同币种同方向 3 秒内只允许一次“加/减/平”成功动作。
@@ -563,6 +574,15 @@ async def execute_live_follow_close(intent: LiveFollowCloseIntent) -> None:
             intent.inst_id, td_mode, api_pos_side
         )
         if not ok_cp:
+            if _is_okx_position_not_exists(data):
+                print(
+                    f"[live_follow] close idempotent_ok(no_position) "
+                    f"follow_id={intent.follow_account_id} sim_id={intent.sim_record_id} inst={intent.inst_id}"
+                )
+                _mark_trade_action_success(intent.okx_api_account_id, intent.inst_id, api_pos_side)
+                _set_live_close_ok(intent.sim_record_id, True)
+                _set_live_last_error(intent.sim_record_id, None)
+                return
             print(
                 f"[live_follow] close fail follow_id={intent.follow_account_id} "
                 f"sim_id={intent.sim_record_id} inst={intent.inst_id}: {data!r}"

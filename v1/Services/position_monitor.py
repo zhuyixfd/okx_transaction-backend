@@ -23,7 +23,8 @@ from v1.Services.live_follow_trade import (
     LiveFollowOpenIntent,
     run_live_follow_intents,
 )
-from v1.Services.okx_contract_helpers import normalize_swap_inst_id
+from v1.Services.okx_account_client import require_okx_client
+from v1.Services.okx_contract_helpers import normalize_swap_inst_id, parse_account_config_fields
 
 
 def _log(msg: str) -> None:
@@ -1079,6 +1080,111 @@ async def _fetch_overview_equity(unique_name: str) -> str | None:
     return None if src_eq is None else str(src_eq)
 
 
+async def _append_unmatched_own_position_closes(
+    account_id: int,
+    source_positions: list[dict[str, Any]],
+    close_intents: list[LiveFollowCloseIntent],
+) -> None:
+    """
+    兜底：当我方实盘存在「对方当前无该币种+方向」的仓位时，补发平仓 intent。
+    仅处理在 follow_sim_records 出现过的币种+方向，避免误伤手工仓位。
+    """
+    db = SessionLocal()
+    try:
+        acc = db.get(FollowAccount, account_id)
+        if not acc or not acc.enabled or not acc.live_trading_enabled or acc.okx_api_account_id is None:
+            return
+        try:
+            client = require_okx_client(db, acc.okx_api_account_id)
+        except Exception:
+            return
+
+        explicit_side_by_ccy = _build_explicit_side_by_ccy(source_positions)
+        source_ccy_side_set: set[tuple[str, str]] = set()
+        for row in source_positions:
+            ccy = str(row.get("posCcy", "")).strip().upper()
+            side = _resolved_follow_side(row, explicit_side_by_ccy)
+            if ccy and side in ("long", "short"):
+                source_ccy_side_set.add((ccy, side))
+
+        sim_rows = (
+            db.execute(
+                select(FollowSimRecord)
+                .where(
+                    FollowSimRecord.follow_account_id == acc.id,
+                    FollowSimRecord.pos_id.not_like("__side_block__:%"),
+                )
+                .order_by(FollowSimRecord.id.desc())
+                .limit(1000)
+            )
+            .scalars()
+            .all()
+        )
+        managed_ccy_side: set[tuple[str, str]] = set()
+        latest_sim_id_by_key: dict[tuple[str, str], int] = {}
+        for rec in sim_rows:
+            ccy = str(rec.pos_ccy or "").strip().upper()
+            side = str(rec.pos_side or "").strip().lower()
+            if not ccy or side not in ("long", "short"):
+                continue
+            key = (ccy, side)
+            managed_ccy_side.add(key)
+            if key not in latest_sim_id_by_key:
+                latest_sim_id_by_key[key] = int(rec.id)
+
+        ok_cfg, cfg_data = await client.get_account_config()
+        _, cfg_pos_mode = parse_account_config_fields(cfg_data) if ok_cfg else (None, None)
+        hedge_mode = cfg_pos_mode != "net_mode"
+        ok_pos, pos_payload = await client.get_positions_inst("SWAP")
+        if not ok_pos or not isinstance(pos_payload, dict):
+            return
+
+        queued = {
+            (it.inst_id.strip().upper(), (it.pos_side or "").strip().lower())
+            for it in close_intents
+        }
+        for row in pos_payload.get("data") or []:
+            if not isinstance(row, dict):
+                continue
+            inst = str(row.get("instId", "")).strip().upper()
+            if not inst or "-SWAP" not in inst:
+                continue
+            try:
+                pos_v = Decimal(str(row.get("pos", "")).strip() or "0")
+            except Exception:
+                pos_v = Decimal(0)
+            if abs(pos_v) <= Decimal("1e-12"):
+                continue
+            ccy = inst.split("-")[0].strip().upper()
+            if hedge_mode:
+                side = str(row.get("posSide", "")).strip().lower()
+                if side not in ("long", "short"):
+                    continue
+            else:
+                side = "long" if pos_v > 0 else "short"
+            key = (ccy, side)
+            if key not in managed_ccy_side:
+                continue
+            if key in source_ccy_side_set:
+                continue
+            qk = (inst, side)
+            if qk in queued:
+                continue
+            close_intents.append(
+                LiveFollowCloseIntent(
+                    follow_account_id=acc.id,
+                    okx_api_account_id=acc.okx_api_account_id,
+                    sim_record_id=latest_sim_id_by_key.get(key, 0),
+                    inst_id=inst,
+                    pos_side=side,
+                    force=True,
+                )
+            )
+            queued.add(qk)
+    finally:
+        db.close()
+
+
 async def _account_position_loop(account_id: int, unique_name: str) -> None:
     """
     单个启用帐户的持仓轮询：异步请求欧易 + 线程池写库。
@@ -1149,6 +1255,7 @@ async def _account_position_loop(account_id: int, unique_name: str) -> None:
                     raw,
                     cached_src_eq,
                 )
+                await _append_unmatched_own_position_closes(account_id, raw, closes)
                 _log(
                     f"tick follow_id={account_id} unique_name={unique_name!r} "
                     f"positions={len(raw)} close={len(closes)} open={len(opens)} adjust={len(adjusts)}"

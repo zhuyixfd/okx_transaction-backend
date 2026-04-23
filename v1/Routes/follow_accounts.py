@@ -1678,7 +1678,7 @@ async def snapshot_follow_side_enable_once(
     body: SnapshotFollowSideBody,
     db: Session = Depends(get_db),
 ) -> dict:
-    """按币种+方向恢复跟单。"""
+    """按币种+方向恢复跟单（删除暂停配置标记）。"""
     ensure_mysql_db_configured()
     un = body.unique_name.strip()
     ccy = body.pos_ccy.strip().upper()
@@ -1690,39 +1690,22 @@ async def snapshot_follow_side_enable_once(
     if acc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
     pid = f"__side_block__:{ccy}:{side}"
-    now = now_cn()
-    rec = FollowSimRecord(
-        follow_account_id=acc.id,
-        pos_id=pid,
-        pos_ccy=ccy,
-        pos_side=side,
-        entry_avg_px=None,
-        stake_usdt=Decimal(0),
-        status="open",
-        open_event_id=None,
-        close_event_id=None,
-        exit_px=None,
-        realized_pnl_usdt=None,
-        unrealized_pnl_usdt=Decimal(0),
-        last_mark_px=None,
-        src_pos=None,
-        src_margin=None,
-        src_mgn_ratio=None,
-        src_liq_px=None,
-        add_position_count=0,
-        reduce_position_count=0,
-        add_margin_count=0,
-        total_invested_usdt=Decimal(0),
-        live_open_ok=True,
-        live_close_ok=None,
-        opened_at=now,
-        closed_at=None,
-        updated_at=now,
+    rows = (
+        db.execute(
+            select(FollowSimRecord).where(
+                FollowSimRecord.follow_account_id == acc.id,
+                FollowSimRecord.pos_id == pid,
+            )
+        )
+        .scalars()
+        .all()
     )
-    db.add(rec)
+    deleted_ids: list[int] = []
+    for rec in rows:
+        deleted_ids.append(int(rec.id))
+        db.delete(rec)
     db.commit()
-    db.refresh(rec)
-    return {"ok": True, "sim_record_id": rec.id}
+    return {"ok": True, "deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
 
 
 @router.patch("/{account_id}/okx-bind", response_model=FollowAccountOut)

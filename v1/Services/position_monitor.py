@@ -1120,7 +1120,6 @@ async def _append_unmatched_own_position_closes(
             .scalars()
             .all()
         )
-        managed_ccy_side: set[tuple[str, str]] = set()
         latest_sim_id_by_key: dict[tuple[str, str], int] = {}
         for rec in sim_rows:
             ccy = str(rec.pos_ccy or "").strip().upper()
@@ -1128,7 +1127,6 @@ async def _append_unmatched_own_position_closes(
             if not ccy or side not in ("long", "short"):
                 continue
             key = (ccy, side)
-            managed_ccy_side.add(key)
             if key not in latest_sim_id_by_key:
                 latest_sim_id_by_key[key] = int(rec.id)
 
@@ -1163,8 +1161,6 @@ async def _append_unmatched_own_position_closes(
             else:
                 side = "long" if pos_v > 0 else "short"
             key = (ccy, side)
-            if key not in managed_ccy_side:
-                continue
             if key in source_ccy_side_set:
                 continue
             qk = (inst, side)

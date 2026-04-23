@@ -31,12 +31,14 @@ app.include_router(manual_okx_router)
 _monitor_tasks_started = False
 _position_monitor_task = None
 _margin_monitor_task = None
+_monitor_lock_db = None
+_monitor_lock_key = "okx_follow_monitor_singleton"
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
     import asyncio
-    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task
+    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task, _monitor_lock_db
 
     # 建表；若无 admin 用户则自动创建（与 migrate/init 等价的一次性引导）。
     try:
@@ -51,6 +53,23 @@ async def on_startup() -> None:
     from v1.Services.margin_monitor import margin_monitor_loop
     from v1.Services.position_monitor import position_monitor_loop
 
+    if db_config.MYSQL_DB:
+        try:
+            lock_db = SessionLocal()
+            got = lock_db.execute(
+                text("SELECT GET_LOCK(:k, 0)"),
+                {"k": _monitor_lock_key},
+            ).scalar_one_or_none()
+            if int(got or 0) != 1:
+                lock_db.close()
+                print("[startup] monitor singleton lock busy; skip monitor tasks in this process.")
+                return
+            _monitor_lock_db = lock_db
+            print("[startup] monitor singleton lock acquired.")
+        except Exception as e:
+            print(f"[startup] acquire monitor singleton lock failed: {e!r}")
+            return
+
     if not _monitor_tasks_started:
         _position_monitor_task = asyncio.create_task(position_monitor_loop())
         _margin_monitor_task = asyncio.create_task(margin_monitor_loop())
@@ -60,7 +79,7 @@ async def on_startup() -> None:
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     import asyncio
-    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task
+    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task, _monitor_lock_db
 
     tasks = [t for t in (_position_monitor_task, _margin_monitor_task) if t is not None]
     for t in tasks:
@@ -70,6 +89,21 @@ async def on_shutdown() -> None:
     _position_monitor_task = None
     _margin_monitor_task = None
     _monitor_tasks_started = False
+    if _monitor_lock_db is not None:
+        try:
+            _monitor_lock_db.execute(
+                text("SELECT RELEASE_LOCK(:k)"),
+                {"k": _monitor_lock_key},
+            )
+            print("[shutdown] monitor singleton lock released.")
+        except Exception as e:
+            print(f"[shutdown] release monitor singleton lock failed: {e!r}")
+        finally:
+            try:
+                _monitor_lock_db.close()
+            except Exception:
+                pass
+            _monitor_lock_db = None
 
 
 @app.get("/health/db")

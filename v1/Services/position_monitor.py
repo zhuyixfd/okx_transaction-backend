@@ -515,13 +515,43 @@ def _reconcile_sim_follow_set(
         .all()
     )
     explicit_side_by_ccy = _build_explicit_side_by_ccy(list(new_map.values()))
+    source_ccy_side_set: set[tuple[str, str]] = set()
+    for row in new_map.values():
+        ccy = str(row.get("posCcy", "")).strip().upper()
+        side = _resolved_follow_side(row, explicit_side_by_ccy)
+        if ccy and side in ("long", "short"):
+            source_ccy_side_set.add((ccy, side))
     seen_open_pid: set[str] = set()
     for rec in open_rows:
         pid = rec.pos_id
+        if str(pid or "").strip().startswith("__side_block__:"):
+            continue
         if pid in seen_open_pid:
             # 同一 pos_id 仅保留最新 open sim，避免重复调仓目标被累计放大。
             continue
         seen_open_pid.add(pid)
+        rec_ccy = str(rec.pos_ccy or "").strip().upper()
+        rec_side = str(rec.pos_side or "").strip().lower()
+        if rec_ccy and rec_side in ("long", "short") and (rec_ccy, rec_side) not in source_ccy_side_set:
+            _close_sim_at_exit(
+                db,
+                acc,
+                pid,
+                {
+                    "posCcy": rec_ccy,
+                    "posSide": rec.pos_side or "",
+                    "avgPx": rec.entry_avg_px or "0",
+                    "last": rec.last_mark_px or rec.entry_avg_px or "0",
+                    "pos": rec.src_pos or "0",
+                    "margin": rec.src_margin or "0",
+                    "mgnRatio": rec.src_mgn_ratio or "0",
+                    "liqPx": rec.src_liq_px or "0",
+                },
+                None,
+                close_intents,
+                force_live_close=True,
+            )
+            continue
         if pid not in new_map:
             _close_sim_at_exit(
                 db,

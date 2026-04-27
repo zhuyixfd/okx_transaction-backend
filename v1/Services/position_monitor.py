@@ -1299,7 +1299,7 @@ async def position_monitor_loop() -> None:
     un_by_aid: dict[int, str] = {}
     while True:
         try:
-            if not db_config.MYSQL_DB:
+            if not db_config.database_url:
                 for t in tasks.values():
                     t.cancel()
                 if tasks:

@@ -21,10 +21,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def ensure_mysql_db_configured() -> None:
-    if not db_config.MYSQL_DB:
+    if not db_config.database_url:
         raise HTTPException(
             status_code=status.HTTP_424_FAILED_DEPENDENCY,
-            detail="MYSQL_DB 未配置：请在 backend/.env 中填写要使用的数据库名后重启",
+            detail="数据库未配置：请检查 backend/.env 后重启",
         )
 
 
@@ -37,7 +37,7 @@ def ensure_default_admin_user() -> None:
     init_db / 建表之后：若不存在用户名为 admin 的帐号，则创建一条。
     密码与 DEFAULT_BOOTSTRAP_PASSWORD 一致，哈希方式与 /auth/login 相同。
     """
-    if not db_config.MYSQL_DB:
+    if not db_config.database_url:
         return
     db = SessionLocal()
     try:

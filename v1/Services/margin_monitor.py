@@ -396,7 +396,7 @@ async def margin_monitor_loop() -> None:
     tasks: dict[int, asyncio.Task] = {}
     while True:
         try:
-            if not db_config.MYSQL_DB:
+            if not db_config.database_url:
                 for t in tasks.values():
                     t.cancel()
                 if tasks:

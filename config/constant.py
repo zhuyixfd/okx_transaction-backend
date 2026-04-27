@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -31,6 +32,7 @@ class DbConfig(BaseSettings):
 
     # Used by SQLAlchemy engine.
     MYSQL_POOL_PRE_PING: bool = True
+    SQLITE_PATH: str = "data/app.db"
 
     @property
     def mysql_url(self) -> str:
@@ -45,6 +47,23 @@ class DbConfig(BaseSettings):
             f"?charset={self.MYSQL_CHARSET}"
             f"&connect_timeout={int(self.MYSQL_CONNECT_TIMEOUT)}"
         )
+
+    @property
+    def database_backend(self) -> str:
+        return "mysql" if bool(self.MYSQL_DB) else "sqlite"
+
+    @property
+    def sqlite_url(self) -> str:
+        p = str(self.SQLITE_PATH or "data/app.db").strip()
+        if not p:
+            p = "data/app.db"
+        if os.path.isabs(p):
+            return f"sqlite:///{p}"
+        return f"sqlite:///./{p}"
+
+    @property
+    def database_url(self) -> str:
+        return self.mysql_url if self.database_backend == "mysql" else self.sqlite_url
 
 
 config = DbConfig()

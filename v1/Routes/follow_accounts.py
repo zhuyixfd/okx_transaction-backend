@@ -405,10 +405,10 @@ def _require_linked_okx_client(db: Session, unique_name: str) -> OkxFollowOrderC
 
 
 def ensure_mysql_db_configured() -> None:
-    if not db_config.MYSQL_DB:
+    if not db_config.database_url:
         raise HTTPException(
             status_code=status.HTTP_424_FAILED_DEPENDENCY,
-            detail="MYSQL_DB 未配置：请在 backend/.env 中填写要使用的数据库名后重启",
+            detail="数据库未配置：请检查 backend/.env 后重启",
         )
 
 

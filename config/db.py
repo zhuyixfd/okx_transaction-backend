@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Generator
 
 from sqlalchemy import create_engine, event
@@ -16,6 +17,10 @@ if db_config.database_backend == "mysql":
     engine_kwargs["pool_recycle"] = 3600
 else:
     # SQLite with threaded background tasks needs cross-thread connection usage.
+    sqlite_path = db_config.database_url.replace("sqlite:///", "", 1)
+    sqlite_dir = os.path.dirname(sqlite_path)
+    if sqlite_dir:
+        os.makedirs(sqlite_dir, exist_ok=True)
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 engine = create_engine(db_config.database_url, **engine_kwargs)
 

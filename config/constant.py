@@ -59,7 +59,8 @@ class DbConfig(BaseSettings):
             p = "data/app.db"
         if os.path.isabs(p):
             return f"sqlite:///{p}"
-        return f"sqlite:///./{p}"
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        return f"sqlite:///{os.path.join(base_dir, p)}"
 
     @property
     def database_url(self) -> str:

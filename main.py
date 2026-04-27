@@ -1,4 +1,7 @@
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import uvicorn
 
 from config.settings import *
@@ -39,9 +42,8 @@ _monitor_lock_db = None
 _monitor_lock_key = "okx_follow_monitor_singleton"
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
-    import asyncio
+@asynccontextmanager
+async def lifespan(_app):
     global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task, _monitor_lock_db
 
     # 建表；若无 admin 用户则自动创建（与 migrate/init 等价的一次性引导）。
@@ -69,6 +71,7 @@ async def on_startup() -> None:
             print("[startup] monitor singleton lock acquired.")
         except Exception as e:
             print(f"[startup] acquire monitor singleton lock failed: {e!r}")
+            yield
             return
 
     if not _monitor_tasks_started:
@@ -76,35 +79,35 @@ async def on_startup() -> None:
         _margin_monitor_task = asyncio.create_task(margin_monitor_loop())
         _monitor_tasks_started = True
 
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    import asyncio
-    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task, _monitor_lock_db
-
-    tasks = [t for t in (_position_monitor_task, _margin_monitor_task) if t is not None]
-    for t in tasks:
-        t.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    _position_monitor_task = None
-    _margin_monitor_task = None
-    _monitor_tasks_started = False
-    if _monitor_lock_db is not None:
-        try:
-            _monitor_lock_db.execute(
-                text("SELECT RELEASE_LOCK(:k)"),
-                {"k": _monitor_lock_key},
-            )
-            print("[shutdown] monitor singleton lock released.")
-        except Exception as e:
-            print(f"[shutdown] release monitor singleton lock failed: {e!r}")
-        finally:
+    try:
+        yield
+    finally:
+        tasks = [t for t in (_position_monitor_task, _margin_monitor_task) if t is not None]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        _position_monitor_task = None
+        _margin_monitor_task = None
+        _monitor_tasks_started = False
+        if _monitor_lock_db is not None:
             try:
-                _monitor_lock_db.close()
-            except Exception:
-                pass
-            _monitor_lock_db = None
+                _monitor_lock_db.execute(
+                    text("SELECT RELEASE_LOCK(:k)"),
+                    {"k": _monitor_lock_key},
+                )
+                print("[shutdown] monitor singleton lock released.")
+            except Exception as e:
+                print(f"[shutdown] release monitor singleton lock failed: {e!r}")
+            finally:
+                try:
+                    _monitor_lock_db.close()
+                except Exception:
+                    pass
+                _monitor_lock_db = None
+
+
+app.router.lifespan_context = lifespan
 
 
 @app.get("/health/db")

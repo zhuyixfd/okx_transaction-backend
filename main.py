@@ -25,7 +25,7 @@ from v1.Routes.manual_okx import router as manual_okx_router
 app = app
 
 from fastapi.staticfiles import StaticFiles
-app.mount("../front/dist", StaticFiles(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory="../front/dist", html=True), name="static")
 
 app.include_router(follow_accounts_router)
 app.include_router(okx_api_accounts_router)

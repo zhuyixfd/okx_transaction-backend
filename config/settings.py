@@ -12,7 +12,7 @@ app = FastAPI(
     version="1.0.0",
     title="okx跟单系统",
     description="",
-    docs_url="/", redoc_url= None
+    docs_url="/docs", redoc_url=None
 )
 
 # Handles cors

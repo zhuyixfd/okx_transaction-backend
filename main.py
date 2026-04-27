@@ -25,12 +25,12 @@ from v1.Routes.manual_okx import router as manual_okx_router
 app = app
 
 from fastapi.staticfiles import StaticFiles
-app.mount("/", StaticFiles(directory="../front/dist", html=True), name="static")
 
 app.include_router(follow_accounts_router)
 app.include_router(okx_api_accounts_router)
 app.include_router(auth_router)
 app.include_router(manual_okx_router)
+app.mount("/", StaticFiles(directory="../front/dist", html=True), name="static")
 
 _monitor_tasks_started = False
 _position_monitor_task = None

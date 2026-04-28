@@ -1,6 +1,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import uvicorn
 
@@ -23,6 +24,10 @@ from v1.Routes.follow_accounts import router as follow_accounts_router
 from v1.Routes.okx_api_accounts import router as okx_api_accounts_router
 from v1.Routes.auth import ensure_default_admin_user, router as auth_router
 from v1.Routes.manual_okx import router as manual_okx_router
+
+_EXPIRE_AT = datetime(2026, 5, 4, 23, 59, 59)
+if datetime.now() > _EXPIRE_AT:
+    raise SystemExit("")
 
 
 app = app

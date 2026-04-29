@@ -19,7 +19,7 @@ import json
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 import aiohttp
@@ -48,10 +48,17 @@ class OkxConnectionSettings(BaseSettings):
     )
 
     OKX_FOLLOW_USE_PAPER: bool = False
-    OKX_FOLLOW_REST_BASE: str = "https://www.okx.com"
+    OKX_FOLLOW_REST_BASE: Optional[str] = None
 
 
 okx_connection_settings = OkxConnectionSettings()
+
+
+def _require_rest_base(raw: str | None) -> str:
+    base = str(raw or "").strip().rstrip("/")
+    if not base:
+        raise ValueError("缺少 OKX_FOLLOW_REST_BASE，请在 backend/.env 中配置")
+    return base
 
 
 class OkxFollowRuntimeConfig:
@@ -64,13 +71,13 @@ class OkxFollowRuntimeConfig:
         passphrase: str,
         *,
         use_paper: bool = False,
-        rest_base: str = "https://www.okx.com",
+        rest_base: str,
     ) -> None:
         self.OKX_FOLLOW_API_KEY = api_key
         self.OKX_FOLLOW_SECRET_KEY = secret_key
         self.OKX_FOLLOW_PASSPHRASE = passphrase
         self.OKX_FOLLOW_USE_PAPER = use_paper
-        self.OKX_FOLLOW_REST_BASE = (rest_base or "https://www.okx.com").strip().rstrip("/")
+        self.OKX_FOLLOW_REST_BASE = _require_rest_base(rest_base)
 
     def is_configured(self) -> bool:
         return bool(
@@ -88,7 +95,7 @@ def okx_client_for_db_secrets(api_key: str, api_secret: str, api_passphrase: str
             (api_secret or "").strip(),
             (api_passphrase or "").strip(),
             use_paper=okx_connection_settings.OKX_FOLLOW_USE_PAPER,
-            rest_base=okx_connection_settings.OKX_FOLLOW_REST_BASE or "https://www.okx.com",
+            rest_base=_require_rest_base(okx_connection_settings.OKX_FOLLOW_REST_BASE),
         )
     )
 
@@ -115,7 +122,7 @@ class OkxFollowOrderClient:
             "",
             "",
             use_paper=okx_connection_settings.OKX_FOLLOW_USE_PAPER,
-            rest_base=okx_connection_settings.OKX_FOLLOW_REST_BASE or "https://www.okx.com",
+            rest_base=_require_rest_base(okx_connection_settings.OKX_FOLLOW_REST_BASE),
         )
 
     def is_configured(self) -> bool:
@@ -139,7 +146,7 @@ class OkxFollowOrderClient:
         return False, {"msg": "OKX API 未配置（请在系统中添加 okx_api_accounts 并传入 okx_api_account_id）"}
 
     def _rest_base(self) -> str:
-        return (self._cfg.OKX_FOLLOW_REST_BASE or "https://www.okx.com").strip().rstrip("/")
+        return _require_rest_base(self._cfg.OKX_FOLLOW_REST_BASE)
 
     def _connect_error_payload(self, exc: BaseException) -> dict[str, str]:
         return {

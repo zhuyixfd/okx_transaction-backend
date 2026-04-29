@@ -43,6 +43,8 @@ _monitor_lock_key = "okx_follow_monitor_singleton"
 async def lifespan(_app):
     global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task, _monitor_lock_db
 
+    print(f"[startup] db_backend={db_config.database_backend} db_url={db_config.database_url}")
+
     # 建表；若无 admin 用户则自动创建（与 migrate/init 等价的一次性引导）。
     try:
         init_db()

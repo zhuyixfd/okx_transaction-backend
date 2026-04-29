@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -15,8 +17,9 @@ class DbConfig(BaseSettings):
     Note: this repo previously referenced `POSTGRES_*`; now it's switched to MySQL.
     """
 
+    _BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_BASE_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -57,10 +60,12 @@ class DbConfig(BaseSettings):
         p = str(self.SQLITE_PATH or "data/app.db").strip()
         if not p:
             p = "data/app.db"
+        # EXE 模式强制固定到 exe 同目录下，避免 onefile 临时目录漂移。
+        if getattr(sys, "frozen", False) and not os.path.isabs(p):
+            p = str((self._BASE_DIR / "db" / "app.db").resolve())
         if os.path.isabs(p):
-            return f"sqlite:///{p}"
-        base_dir = os.path.dirname(os.path.dirname(__file__))
-        return f"sqlite:///{os.path.join(base_dir, p)}"
+            return f"sqlite:///{Path(p).resolve().as_posix()}"
+        return f"sqlite:///{(self._BASE_DIR / p).resolve().as_posix()}"
 
     @property
     def database_url(self) -> str:

@@ -774,6 +774,77 @@ def _append_retry_failed_live_closes(
         )
 
 
+def _append_retry_failed_live_opens(
+    db: Session,
+    acc: FollowAccount,
+    new_map: dict[str, dict[str, Any]],
+    eligible: set[str],
+    source_equity_usdt: Decimal | None,
+    open_intents: list[LiveFollowOpenIntent],
+) -> None:
+    """
+    真实开仓失败补偿：
+    - 仅处理最新 open sim 中 live_open_ok == False 的记录
+    - 仅当该 pid 仍存在于对方快照且仍在 eligible 集合时重试
+    - 避免重复：若本轮已存在相同 (pos_id) 的 open_intent 则跳过
+    """
+    if not acc.live_trading_enabled or acc.okx_api_account_id is None:
+        return
+
+    queued_pos_ids: set[str] = {it.pos_id for it in open_intents}
+
+    # 取每个 pos_id 最新一条 open sim
+    rows = (
+        db.execute(
+            select(FollowSimRecord)
+            .where(
+                FollowSimRecord.follow_account_id == acc.id,
+                FollowSimRecord.status == "open",
+                FollowSimRecord.pos_id.not_like("__side_block__:%"),
+            )
+            .order_by(FollowSimRecord.id.desc())
+            .limit(300)
+        )
+        .scalars()
+        .all()
+    )
+
+    seen_pid: set[str] = set()
+    for rec in rows:
+        pid = str(rec.pos_id or "").strip()
+        if not pid or pid in seen_pid:
+            continue
+        seen_pid.add(pid)
+
+        if pid in queued_pos_ids:
+            continue
+        if rec.live_open_ok is not False:
+            continue
+        if pid not in new_map or pid not in eligible:
+            continue
+
+        row = new_map.get(pid)
+        if not isinstance(row, dict):
+            continue
+
+        ccy = str(row.get("posCcy", "")).strip().upper()
+        ps = _effective_follow_side(row)
+        if not ccy or ps not in ("long", "short"):
+            continue
+        # 暂停配置：该币种+方向不重试
+        if _is_ccy_side_manually_blocked(db, acc.id, ccy, ps):
+            continue
+
+        _append_live_follow_open_intent(
+            acc,
+            sim_id=rec.id,
+            row=row,
+            pid=pid,
+            open_intents=open_intents,
+            source_equity_usdt=source_equity_usdt,
+        )
+
+
 def _apply_snapshot_and_events(
     db: Session,
     acc: FollowAccount,
@@ -963,6 +1034,14 @@ def _apply_snapshot_and_events(
         skip_open_pids=frozenset(open_branch_handled_pids),
         old_map=old_map,
         source_equity_usdt=source_equity_usdt,
+    )
+    _append_retry_failed_live_opens(
+        db,
+        acc,
+        new_map,
+        eligible,
+        source_equity_usdt=source_equity_usdt,
+        open_intents=open_intents,
     )
     _refresh_sim_unrealized(db, acc.id, new_map)
     db.commit()

@@ -25,20 +25,12 @@ from v1.Routes.okx_api_accounts import router as okx_api_accounts_router
 from v1.Routes.auth import ensure_default_admin_user, router as auth_router
 from v1.Routes.manual_okx import router as manual_okx_router
 
-_EXPIRE_AT = datetime(2026, 5, 4, 23, 59, 59)
-if datetime.now() > _EXPIRE_AT:
-    raise SystemExit("")
-
-
 app = app
-
-from fastapi.staticfiles import StaticFiles
 
 app.include_router(follow_accounts_router)
 app.include_router(okx_api_accounts_router)
 app.include_router(auth_router)
 app.include_router(manual_okx_router)
-app.mount("/", StaticFiles(directory="../front/dist", html=True), name="static")
 
 _monitor_tasks_started = False
 _position_monitor_task = None

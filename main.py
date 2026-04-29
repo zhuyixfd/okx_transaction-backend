@@ -1,7 +1,11 @@
 
 import asyncio
+import hashlib
+import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 
 import uvicorn
 
@@ -37,11 +41,52 @@ _position_monitor_task = None
 _margin_monitor_task = None
 _monitor_lock_db = None
 _monitor_lock_key = "okx_follow_monitor_singleton"
+_monitor_lock_file_path: Path | None = None
+_FILE_LOCK_STALE_SEC = 120.0
+
+
+def _monitor_singleton_lock_path() -> Path:
+    h = hashlib.sha256(_monitor_lock_key.encode("utf-8")).hexdigest()[:16]
+    return Path(__file__).resolve().parent / "data" / "locks" / f"monitor_{h}.lock"
+
+
+def _try_acquire_file_lock(lock_path: Path) -> bool:
+    try:
+        os.makedirs(lock_path.parent, exist_ok=True)
+        if lock_path.exists():
+            age = time.time() - lock_path.stat().st_mtime
+            if age > _FILE_LOCK_STALE_SEC:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                return False
+
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return False
+
+
+def _release_file_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 
 @asynccontextmanager
 async def lifespan(_app):
-    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task, _monitor_lock_db
+    global _monitor_tasks_started, _position_monitor_task, _margin_monitor_task, _monitor_lock_db, _monitor_lock_file_path
 
     print(f"[startup] db_backend={db_config.database_backend} db_url={db_config.database_url}")
 
@@ -116,6 +161,18 @@ async def lifespan(_app):
             print(f"[startup] acquire monitor singleton lock failed: {e!r}")
             yield
             return
+    else:
+        try:
+            _monitor_lock_file_path = _monitor_singleton_lock_path()
+            got = _try_acquire_file_lock(_monitor_lock_file_path)
+            if not got:
+                print("[startup] monitor singleton file lock busy; skip monitor tasks in this process.")
+                return
+            print("[startup] monitor singleton file lock acquired.")
+        except Exception as e:
+            print(f"[startup] acquire monitor singleton file lock failed: {e!r}")
+            yield
+            return
 
     if not _monitor_tasks_started:
         _position_monitor_task = asyncio.create_task(position_monitor_loop())
@@ -148,6 +205,13 @@ async def lifespan(_app):
                 except Exception:
                     pass
                 _monitor_lock_db = None
+        if _monitor_lock_file_path is not None:
+            try:
+                _release_file_lock(_monitor_lock_file_path)
+                print("[shutdown] monitor singleton file lock released.")
+            except Exception:
+                pass
+            _monitor_lock_file_path = None
 
 
 app.router.lifespan_context = lifespan

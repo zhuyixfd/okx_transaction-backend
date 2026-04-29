@@ -299,13 +299,21 @@ def _append_live_follow_open_intent(
     open_intents: list[LiveFollowOpenIntent],
     *,
     source_equity_usdt: Decimal | None,
+    explicit_side_by_ccy: dict[str, set[str]] | None = None,
 ) -> None:
     if not _should_emit_live_open(acc):
+        print(
+            f"[live_follow] open skip live_trading_disabled follow_id={acc.id} "
+            f"pid={pid} sim_id={sim_id} live_trading_enabled={getattr(acc,'live_trading_enabled',None)} "
+            f"okx_api_account_id={getattr(acc,'okx_api_account_id',None)}"
+        )
         return
     ccy = (row.get("posCcy") or "").strip()
     if not ccy:
         return
     ps = _effective_follow_side(row)
+    if ps not in ("long", "short") and explicit_side_by_ccy is not None:
+        ps = _resolved_follow_side(row, explicit_side_by_ccy)
     if ps not in ("long", "short"):
         return
     coeff = (
@@ -690,6 +698,7 @@ def _reconcile_sim_follow_set(
                     pid,
                     open_intents,
                     source_equity_usdt=source_equity_usdt,
+                    explicit_side_by_ccy=explicit_side_by_ccy,
                 )
 
 
@@ -791,6 +800,7 @@ def _append_retry_failed_live_opens(
     if not acc.live_trading_enabled or acc.okx_api_account_id is None:
         return
 
+    explicit_side_by_ccy = _build_explicit_side_by_ccy(list(new_map.values()))
     queued_pos_ids: set[str] = {it.pos_id for it in open_intents}
 
     # 取每个 pos_id 最新一条 open sim
@@ -816,6 +826,14 @@ def _append_retry_failed_live_opens(
             continue
         seen_pid.add(pid)
 
+        # 调试：打印每个 open sim 的 live_open_ok，便于确认是否触发重试逻辑。
+        if len(open_intents) == 0:
+            print(
+                f"[open_retry_dbg] follow_id={acc.id} sim_id={rec.id} pid={pid} "
+                f"live_open_ok={getattr(rec, 'live_open_ok', None)} "
+                f"pos_ccy={str(getattr(rec,'pos_ccy', '')).strip()} pos_side={getattr(rec,'pos_side', None)}"
+            )
+
         if pid in queued_pos_ids:
             continue
         # 只要不是“已确认开仓成功”，就允许重试：
@@ -832,6 +850,8 @@ def _append_retry_failed_live_opens(
 
         ccy = str(row.get("posCcy", "")).strip().upper()
         ps = _effective_follow_side(row)
+        if ps not in ("long", "short") and explicit_side_by_ccy is not None:
+            ps = _resolved_follow_side(row, explicit_side_by_ccy)
         if not ccy or ps not in ("long", "short"):
             continue
         # 暂停配置：该币种+方向不重试
@@ -845,6 +865,7 @@ def _append_retry_failed_live_opens(
             pid=pid,
             open_intents=open_intents,
             source_equity_usdt=source_equity_usdt,
+            explicit_side_by_ccy=explicit_side_by_ccy,
         )
 
 
@@ -983,6 +1004,7 @@ def _apply_snapshot_and_events(
                         pid,
                         open_intents,
                         source_equity_usdt=source_equity_usdt,
+                        explicit_side_by_ccy=explicit_side_by_ccy,
                     )
             else:
                 _log_not_follow_reason(

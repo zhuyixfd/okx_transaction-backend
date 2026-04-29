@@ -9,15 +9,19 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy import select
 
 from config.cn_time import now_cn
 from config.db import SessionLocal
+from config.constant import config as db_config
 from module.follow_order import okx_client_for_db_secrets
 from v1.Models.follow_sim_record import FollowSimRecord
 from v1.Models.okx_api_account import OkxApiAccount
@@ -36,6 +40,52 @@ _live_open_locks: dict[tuple[int, str, str], asyncio.Lock] = {}
 """(okx_api_accounts.id, instId 大写, pos_side long|short) 下同进程串行开仓。"""
 _live_trade_success_last_ts: dict[tuple[int, str, str], float] = {}
 _live_min_sz_fail_last_ts: dict[tuple[int, str, str], float] = {}
+
+
+_LOCK_DIR = Path(__file__).resolve().parents[2] / "data" / "locks"
+_FILE_LOCK_STALE_SEC = 120.0
+
+
+def _trade_guard_lock_path(okx_api_account_id: int, inst_id: str, pos_side: str | None) -> Path:
+    side = (pos_side or "net").strip().lower() or "net"
+    inst = inst_id.strip().upper()
+    raw_key = f"live_follow:{okx_api_account_id}:{inst}:{side}"
+    h = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:16]
+    return _LOCK_DIR / f"trade_guard_{h}.lock"
+
+
+def _try_acquire_file_lock(lock_path: Path) -> bool:
+    try:
+        os.makedirs(lock_path.parent, exist_ok=True)
+        if lock_path.exists():
+            # 避免死锁：锁文件过久认为过期
+            age = time.time() - lock_path.stat().st_mtime
+            if age > _FILE_LOCK_STALE_SEC:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                return False
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return False
+
+
+def _release_file_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 
 def _summarize_order_error(payload: object) -> str:
@@ -119,9 +169,16 @@ def _acquire_trade_guard_lock(
     timeout_sec: int = 0,
 ) -> SessionLocal | None:
     """
-    跨进程互斥：基于 MySQL GET_LOCK，避免多进程重复对同一标的同向下单。
+    跨进程互斥：SQLite 用文件锁；MySQL 用 GET_LOCK。
     成功返回持锁 Session；失败返回 None。
     """
+    if db_config.database_backend != "mysql":
+        lock_path = _trade_guard_lock_path(okx_api_account_id, inst_id, pos_side)
+        if not _try_acquire_file_lock(lock_path):
+            return None
+        # Session 不会在 create 时触发连接；这里只是为了沿用原有 release 调用路径。
+        return SessionLocal()
+
     db = SessionLocal()
     try:
         key = _trade_guard_lock_key(okx_api_account_id, inst_id, pos_side)
@@ -170,6 +227,11 @@ def _release_trade_guard_lock(
     if db is None:
         return
     try:
+        if db_config.database_backend != "mysql":
+            lock_path = _trade_guard_lock_path(okx_api_account_id, inst_id, pos_side)
+            _release_file_lock(lock_path)
+            return
+
         key = _trade_guard_lock_key(okx_api_account_id, inst_id, pos_side)
         db.execute(text("SELECT RELEASE_LOCK(:k)"), {"k": key})
     except Exception:
@@ -629,7 +691,7 @@ async def execute_live_follow_adjust(intent: LiveFollowAdjustIntent) -> None:
         )
         return
     guard_db = await _acquire_trade_guard_lock_with_retry(
-        intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=1
+        intent.okx_api_account_id, intent.inst_id, intent.pos_side, timeout_sec=2
     )
     if guard_db is None:
         print(

@@ -818,7 +818,10 @@ def _append_retry_failed_live_opens(
 
         if pid in queued_pos_ids:
             continue
-        if rec.live_open_ok is not False:
+        # 只要不是“已确认开仓成功”，就允许重试：
+        # - live_open_ok=False：明确失败
+        # - live_open_ok=None/NULL：尚未尝试/写入过状态
+        if rec.live_open_ok is True:
             continue
         if pid not in new_map or pid not in eligible:
             continue

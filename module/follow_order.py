@@ -16,6 +16,7 @@ import base64
 import hashlib
 import hmac
 import json
+import sys
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
@@ -25,9 +26,42 @@ from urllib.parse import urlencode
 import aiohttp
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# 与相对 CWD 的 ".env" 不同：始终读 backend/.env（避免从仓库根目录启动时读不到）
-_BACKEND_ROOT = Path(__file__).resolve().parent.parent
-_ENV_PATH = _BACKEND_ROOT / ".env"
+# 与相对 CWD 的 ".env" 不同：优先读取运行时可访问的 .env。
+# PyInstaller(onefile) 下 __file__/CWD 会变化，所以要适配 frozen 模式。
+def _pick_env_path() -> Path:
+    candidates: list[Path] = []
+    # 0) 当前工作目录（用户从 backend 目录运行 exe 时最稳）
+    try:
+        candidates.append(Path.cwd() / ".env")
+    except Exception:
+        pass
+    # 1) exe 所在目录：最常见（用户把 .env 放在 backend/，main.exe 也在 backend/）
+    if getattr(sys, "frozen", False):
+        try:
+            candidates.append(Path(sys.executable).resolve().parent / ".env")
+        except Exception:
+            pass
+        # 2) PyInstaller 解压目录：如果你把 .env 打进了 onefile 的资源
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            try:
+                candidates.append(Path(meipass) / ".env")
+            except Exception:
+                pass
+    # 3) 开发环境：源码相对路径
+    try:
+        candidates.append(Path(__file__).resolve().parent.parent / ".env")
+    except Exception:
+        pass
+
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    # 回退：无论是否存在，都返回一个默认路径给 pydantic（后续报错会提示你缺少）
+    return candidates[0] if candidates else (Path(__file__).resolve().parent.parent / ".env")
+
+
+_ENV_PATH = _pick_env_path()
 
 _PLACE_ORDER_PATH = "/api/v5/trade/order"
 _CLOSE_POSITION_PATH = "/api/v5/trade/close-position"

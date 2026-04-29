@@ -24,44 +24,7 @@ from typing import Any, Optional
 from urllib.parse import urlencode
 
 import aiohttp
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-# 与相对 CWD 的 ".env" 不同：优先读取运行时可访问的 .env。
-# PyInstaller(onefile) 下 __file__/CWD 会变化，所以要适配 frozen 模式。
-def _pick_env_path() -> Path:
-    candidates: list[Path] = []
-    # 0) 当前工作目录（用户从 backend 目录运行 exe 时最稳）
-    try:
-        candidates.append(Path.cwd() / ".env")
-    except Exception:
-        pass
-    # 1) exe 所在目录：最常见（用户把 .env 放在 backend/，main.exe 也在 backend/）
-    if getattr(sys, "frozen", False):
-        try:
-            candidates.append(Path(sys.executable).resolve().parent / ".env")
-        except Exception:
-            pass
-        # 2) PyInstaller 解压目录：如果你把 .env 打进了 onefile 的资源
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            try:
-                candidates.append(Path(meipass) / ".env")
-            except Exception:
-                pass
-    # 3) 开发环境：源码相对路径
-    try:
-        candidates.append(Path(__file__).resolve().parent.parent / ".env")
-    except Exception:
-        pass
-
-    for p in candidates:
-        if p.exists() and p.is_file():
-            return p
-    # 回退：无论是否存在，都返回一个默认路径给 pydantic（后续报错会提示你缺少）
-    return candidates[0] if candidates else (Path(__file__).resolve().parent.parent / ".env")
-
-
-_ENV_PATH = _pick_env_path()
+ 
 
 _PLACE_ORDER_PATH = "/api/v5/trade/order"
 _CLOSE_POSITION_PATH = "/api/v5/trade/close-position"
@@ -72,20 +35,12 @@ _SET_POSITION_MODE_PATH = "/api/v5/account/set-position-mode"
 _DEFAULT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=15)
 
 
-class OkxConnectionSettings(BaseSettings):
-    """仅连接相关：REST 域名、是否走欧易模拟盘头；密钥从数据库注入 OkxFollowRuntimeConfig。"""
-
-    model_config = SettingsConfigDict(
-        env_file=_ENV_PATH,
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    OKX_FOLLOW_USE_PAPER: bool = False
-    OKX_FOLLOW_REST_BASE: Optional[str] = None
-
-
-okx_connection_settings = OkxConnectionSettings()
+#
+# OKX 连接配置由后端在启动时注入（main.py/lifespan），
+# follow_order 不再实例化 BaseSettings 去读取 .env 配置文件。
+#
+_OKX_FOLLOW_USE_PAPER: bool = False
+_OKX_FOLLOW_REST_BASE: str | None = None
 
 
 def _require_rest_base(raw: str | None) -> str:
@@ -93,6 +48,13 @@ def _require_rest_base(raw: str | None) -> str:
     if not base:
         raise ValueError("缺少 OKX_FOLLOW_REST_BASE，请在 backend/.env 中配置")
     return base
+
+
+def init_okx_connection_settings(*, use_paper: bool, rest_base: str) -> None:
+    """由后端启动注入 OKX REST 域名与是否模拟盘头。"""
+    global _OKX_FOLLOW_USE_PAPER, _OKX_FOLLOW_REST_BASE
+    _OKX_FOLLOW_USE_PAPER = bool(use_paper)
+    _OKX_FOLLOW_REST_BASE = _require_rest_base(rest_base)
 
 
 class OkxFollowRuntimeConfig:
@@ -122,14 +84,14 @@ class OkxFollowRuntimeConfig:
 
 
 def okx_client_for_db_secrets(api_key: str, api_secret: str, api_passphrase: str) -> OkxFollowOrderClient:
-    """使用数据库中的密钥构造客户端（REST/模拟盘头仍读 .env OkxConnectionSettings）。"""
+    """使用数据库中的密钥构造客户端（rest_base/use_paper 来自后端注入）。"""
     return OkxFollowOrderClient(
         OkxFollowRuntimeConfig(
             (api_key or "").strip(),
             (api_secret or "").strip(),
             (api_passphrase or "").strip(),
-            use_paper=okx_connection_settings.OKX_FOLLOW_USE_PAPER,
-            rest_base=_require_rest_base(okx_connection_settings.OKX_FOLLOW_REST_BASE),
+            use_paper=_OKX_FOLLOW_USE_PAPER,
+            rest_base=_require_rest_base(_OKX_FOLLOW_REST_BASE),
         )
     )
 
@@ -155,8 +117,8 @@ class OkxFollowOrderClient:
             "",
             "",
             "",
-            use_paper=okx_connection_settings.OKX_FOLLOW_USE_PAPER,
-            rest_base=_require_rest_base(okx_connection_settings.OKX_FOLLOW_REST_BASE),
+            use_paper=_OKX_FOLLOW_USE_PAPER,
+            rest_base=_require_rest_base(_OKX_FOLLOW_REST_BASE),
         )
 
     def is_configured(self) -> bool:

@@ -45,6 +45,50 @@ async def lifespan(_app):
 
     print(f"[startup] db_backend={db_config.database_backend} db_url={db_config.database_url}")
 
+    # OKX REST 连接域名/是否模拟盘头：只在启动阶段读取一次，然后注入给 follow_order。
+    try:
+        from pydantic_settings import BaseSettings, SettingsConfigDict
+        from module.follow_order import init_okx_connection_settings
+        from pathlib import Path
+        import sys
+
+        def _pick_env_path() -> Path:
+            candidates: list[Path] = []
+            try:
+                candidates.append(Path.cwd() / ".env")
+            except Exception:
+                pass
+            try:
+                candidates.append(Path(__file__).resolve().parent / ".env")
+            except Exception:
+                pass
+            if getattr(sys, "frozen", False):
+                try:
+                    candidates.append(Path(sys.executable).resolve().parent / ".env")
+                except Exception:
+                    pass
+                meipass = getattr(sys, "_MEIPASS", None)
+                if meipass:
+                    try:
+                        candidates.append(Path(meipass) / ".env")
+                    except Exception:
+                        pass
+            return next((p for p in candidates if p.exists() and p.is_file()), candidates[0] if candidates else Path(__file__).resolve().parent / ".env")
+
+        env_path = _pick_env_path()
+
+        class _OkxEnv(BaseSettings):
+            model_config = SettingsConfigDict(env_file=str(env_path), env_file_encoding="utf-8", extra="ignore")
+            OKX_FOLLOW_USE_PAPER: bool = False
+            OKX_FOLLOW_REST_BASE: str
+
+        okx_env = _OkxEnv()
+        init_okx_connection_settings(use_paper=okx_env.OKX_FOLLOW_USE_PAPER, rest_base=okx_env.OKX_FOLLOW_REST_BASE)
+        print(f"[startup] okx_rest_base={okx_env.OKX_FOLLOW_REST_BASE} okx_use_paper={okx_env.OKX_FOLLOW_USE_PAPER}")
+    except Exception as e:
+        print(f"[startup] okx config load/init failed: {e!r}")
+        raise
+
     # 建表；若无 admin 用户则自动创建（与 migrate/init 等价的一次性引导）。
     try:
         init_db()

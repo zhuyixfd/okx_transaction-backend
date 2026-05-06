@@ -2,8 +2,10 @@ import re
 import time
 import json
 from datetime import datetime
+from pathlib import Path
 
 import aiohttp
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.cn_time import CN_TZ
 
@@ -96,19 +98,50 @@ _DEFAULT_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
+# 始终读取 backend/.env
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+_ENV_PATH = _BACKEND_ROOT / ".env"
+
+
+class OkxPublicSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=_ENV_PATH,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+    OKX_PUBLIC_COMMUNITY_BASE_URL: str = ""
+    OKX_PUBLIC_OVERVIEW_PAGE_TPL: str = ""
+
+
+okx_public_settings = OkxPublicSettings()
+
 
 class OkxTrade:
-    query_position_current: str = (
-        "https://www.oyigwcn.biz/priapi/v5/ecotrade/public/community/user/position-current"
-    )
-    query_position_history: str = (
-        "https://www.oyigwcn.biz/priapi/v5/ecotrade/public/community/user/position-history"
-    )
     _session: aiohttp.ClientSession | None = None
-    overview_page_tpl: str = "https://www.oyigwcn.biz/zh-hans/copy-trading/account/{unique_name}?tab=trade"
 
     def __init__(self):
         pass
+
+    @classmethod
+    def query_position_current_url(cls) -> str:
+        base = str(okx_public_settings.OKX_PUBLIC_COMMUNITY_BASE_URL or "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError("缺少 OKX_PUBLIC_COMMUNITY_BASE_URL，请在 backend/.env 中配置")
+        return f"{base}/priapi/v5/ecotrade/public/community/user/position-current"
+
+    @classmethod
+    def query_position_history_url(cls) -> str:
+        base = str(okx_public_settings.OKX_PUBLIC_COMMUNITY_BASE_URL or "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError("缺少 OKX_PUBLIC_COMMUNITY_BASE_URL，请在 backend/.env 中配置")
+        return f"{base}/priapi/v5/ecotrade/public/community/user/position-history"
+
+    @classmethod
+    def overview_page_tpl(cls) -> str:
+        tpl = str(okx_public_settings.OKX_PUBLIC_OVERVIEW_PAGE_TPL or "").strip()
+        if not tpl:
+            raise RuntimeError("缺少 OKX_PUBLIC_OVERVIEW_PAGE_TPL，请在 backend/.env 中配置")
+        return tpl
 
     @classmethod
     def get_session(cls) -> aiohttp.ClientSession:
@@ -156,7 +189,7 @@ class OkxTrade:
         """
         session = cls.get_session()
         async with session.get(
-            url=cls.query_position_current,
+            url=cls.query_position_current_url(),
             params={"uniqueName": uniqueName, "t": int(time.time() * 1000)},
         ) as response:
             data = await response.json()
@@ -173,7 +206,7 @@ class OkxTrade:
         session = cls.get_session()
         try:
             async with session.get(
-                url=cls.query_position_current,
+                url=cls.query_position_current_url(),
                 params={"uniqueName": uniqueName, "t": int(time.time() * 1000)},
             ) as response:
                 if response.status != 200:
@@ -202,7 +235,7 @@ class OkxTrade:
         """
         session = cls.get_session()
         async with session.get(
-            url=cls.query_position_history,
+            url=cls.query_position_history_url(),
             params={
                 "uniqueName": unique_name.strip(),
                 "limit": int(limit),
@@ -224,7 +257,7 @@ class OkxTrade:
             ...
         }
         """
-        url = cls.overview_page_tpl.format(unique_name=unique_name.strip())
+        url = cls.overview_page_tpl().format(unique_name=unique_name.strip())
         session = cls.get_session()
         async with session.get(url, allow_redirects=True) as response:
             html = await response.text()

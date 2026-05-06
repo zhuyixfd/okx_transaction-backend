@@ -407,6 +407,13 @@ def _close_sim_at_exit(
     ).scalar_one_or_none()
     if rec is None:
         return
+    rec_ccy = str(rec.pos_ccy or "").strip().upper()
+    rec_side = str(rec.pos_side or "").strip().lower()
+    if rec_ccy and rec_side in ("long", "short") and _is_ccy_side_manually_blocked(
+        db, acc.id, rec_ccy, rec_side
+    ):
+        # 暂停跟单配置：该币种+方向完全不介入（不开仓、不平仓）。
+        return
     # 只要进入关闭流程且启用真实跟单，就尝试触发实盘平仓。
     # 不再强依赖 live_open_ok=True，避免状态漂移导致“对方已平而我方未平”。
     want_live_close = (
@@ -759,6 +766,10 @@ def _append_retry_failed_live_closes(
         if rec.status != "closed" or rec.live_close_ok is not False:
             continue
         ccy = str(rec.pos_ccy or "").strip().upper()
+        side = str(rec.pos_side or "").strip().lower()
+        if ccy and side in ("long", "short") and _is_ccy_side_manually_blocked(db, acc.id, ccy, side):
+            # 暂停跟单配置：该币种+方向不做自动补偿平仓。
+            continue
         inst_id = normalize_swap_inst_id(ccy) if ccy else ""
         if not inst_id:
             continue

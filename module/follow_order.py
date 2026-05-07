@@ -4,6 +4,7 @@ OKX v5 私有接口（下单 / 持仓 / 成交 / 保证金账单等）。
 - 类 OkxFollowOrderClient：封装签名与 HTTP；密钥通过 OkxFollowRuntimeConfig / okx_client_for_db_secrets 注入。
 - 路由层用数据库凭证时统一经 v1.Services.okx_account_client.require_okx_client。
 - .env 仅可选：OKX_FOLLOW_REST_BASE、OKX_FOLLOW_USE_PAPER（模拟盘请求头）。
+- HTTP 连接固定使用 IPv4（避免 IPv6 导致 aiohttp 卡顿）。
 
 主要方法：place_order、place_swap_market_by_principal_usdt、get_positions_inst、get_trade_fills、
 get_margin_transfer_bills、add_position_margin、get_account_config、set_leverage 等。
@@ -16,6 +17,7 @@ import base64
 import hashlib
 import hmac
 import json
+import socket
 from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
@@ -37,6 +39,11 @@ _SET_LEVERAGE_PATH = "/api/v5/account/set-leverage"
 _SET_POSITION_MODE_PATH = "/api/v5/account/set-position-mode"
 
 _DEFAULT_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=15)
+
+
+def _okx_tcp_connector_ipv4() -> aiohttp.TCPConnector:
+    """欧易私有 REST 一律走 IPv4，避免 IPv6 解析/路由导致连接长时间卡住。"""
+    return aiohttp.TCPConnector(family=socket.AF_INET)
 
 
 class OkxConnectionSettings(BaseSettings):
@@ -185,7 +192,10 @@ class OkxFollowOrderClient:
         headers = self._headers("GET", request_path, "")
 
         try:
-            async with aiohttp.ClientSession(timeout=_DEFAULT_HTTP_TIMEOUT) as session:
+            async with aiohttp.ClientSession(
+                connector=_okx_tcp_connector_ipv4(),
+                timeout=_DEFAULT_HTTP_TIMEOUT,
+            ) as session:
                 async with session.get(url, headers=headers) as resp:
                     return await self._parse_http_json(resp)
         except asyncio.TimeoutError:
@@ -201,7 +211,10 @@ class OkxFollowOrderClient:
         headers = self._headers("POST", request_path, body)
 
         try:
-            async with aiohttp.ClientSession(timeout=_DEFAULT_HTTP_TIMEOUT) as session:
+            async with aiohttp.ClientSession(
+                connector=_okx_tcp_connector_ipv4(),
+                timeout=_DEFAULT_HTTP_TIMEOUT,
+            ) as session:
                 async with session.post(url, headers=headers, data=body.encode("utf-8")) as resp:
                     return await self._parse_http_json(resp)
         except asyncio.TimeoutError:
@@ -213,7 +226,10 @@ class OkxFollowOrderClient:
         """公共接口，无需 API Key（用于按 USDT 本金换算张数）。"""
         url = self._rest_base() + request_path
         try:
-            async with aiohttp.ClientSession(timeout=_DEFAULT_HTTP_TIMEOUT) as session:
+            async with aiohttp.ClientSession(
+                connector=_okx_tcp_connector_ipv4(),
+                timeout=_DEFAULT_HTTP_TIMEOUT,
+            ) as session:
                 async with session.get(url) as resp:
                     return await self._parse_http_json(resp)
         except asyncio.TimeoutError:
